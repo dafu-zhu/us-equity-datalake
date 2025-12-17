@@ -445,12 +445,14 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "polars" },
+    { name = "requests" },
     { name = "yfinance" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "polars", specifier = ">=1.36.1" },
+    { name = "requests", specifier = ">=2.32.5" },
     { name = "yfinance", specifier = ">=0.2.66" },
 ]
 
