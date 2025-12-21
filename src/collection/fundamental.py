@@ -2,7 +2,7 @@ import requests
 import time
 from collection.models import FndDataPoint
 import datetime as dt
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from pathlib import Path
 from collections import defaultdict
 import polars as pl
@@ -16,10 +16,13 @@ class Fundamental:
         self.symbol = symbol
         self.log_dir = Path("data/logs/fundamental")
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.calendar_path = Path("data/calendar/master.parquet")
+        self.output_dir = Path("data/raw/fundamental")
+        self.fields_df = None
 
     def get_facts(self, field: str, sleep=True) -> List[dict]:
         """
-        Get historical facts of a company using SEC XBRL
+        Get the complete historical facts of a company using SEC XBRL
 
         :param cik: Company identifier
         :type cik: str
@@ -105,7 +108,49 @@ class Fundamental:
             dps.append(dp_obj)
 
         return dps
+    
+    def get_value_tuple(self, field: str) -> List[Tuple[dt.date, float]]:
+        """
+        Process the result of get_dps, transform list of FndDataPoint into 
+        a list of tuple in order to fit in dataframe
+        
+        :param field: Fundamental field name
+        :type field: str
+        :return: list of tuples with (date, value), ordered in date
+        :rtype: List[Tuple[date, float]]
 
+        Example: [(date(2024, 9, 1), 9.1), (date(2024, 12, 1), 12.1)]
+        """
+        try:
+            dps = self.get_dps(field)
+            value_tuples = []
+            for dp in dps:
+                date: dt.date = dp.timestamp
+                value = dp.value
+                value_tuples.append((date, value))
+            
+            value_tuples.sort(key=lambda x: x[0])
+
+            return value_tuples
+        
+        except KeyError as error:
+            # Field not available for this company
+            self._log_error(field, 'FieldNotAvailable', str(error))
+            print(f"  ⚠ Field '{field}' not available (logged)")
+            return []
+
+        except requests.RequestException as error:
+            # Network or API error
+            self._log_error(field, 'RequestException', str(error))
+            print(f"  ⚠ Request failed for '{field}' (logged)")
+            return []
+
+        except Exception as error:
+            # Unexpected error
+            self._log_error(field, 'UnexpectedException', str(error))
+            print(f"  ⚠ Unexpected error for '{field}': {error} (logged)")
+            return []
+        
     def _log_error(self, field: str, error_type: str, error_message: str) -> None:
         """
         Log field fetching errors to JSON file.
@@ -140,166 +185,98 @@ class Fundamental:
         # Write back to file
         with open(log_file, 'w') as file:
             json.dump(logs, file, indent=2)
-
-    def _deduplicate_dps(self, dps: List[FndDataPoint]) -> List[FndDataPoint]:
+    
+    def collect_fields(self, year: int, fields: List[str]) -> pl.DataFrame:
         """
-        Deduplicate datapoints by keeping the most recent filing per fiscal period.
-
-        Groups by (end_date, fy, fp) and selects the filing with the latest timestamp.
-        This ensures amendments (10-K/A) supersede original filings (10-K).
-
-        :param dps: List of FundamentalDataPoint objects
-        :return: Deduplicated list of FundamentalDataPoint objects
+        Collect multiple fields and put into one single dataframe
+        
+        :param year: what year
+        :type year: int
+        :param fields: what fields
+        :type fields: List[str]
+        :return: dataframe with columns [Date, Field1, Field2, ...]
+        :rtype: DataFrame
         """
-        # Group by fiscal period: (end_date, fy, fp)
-        groups = defaultdict(list)
-        for dp in dps:
-            key = (dp.end_date, dp.fy, dp.fp)
-            groups[key].append(dp)
-
-        # Select most recent filing per group
-        deduplicated = []
-        for key, group in groups.items():
-            # Sort by timestamp (filed date) descending, take the most recent
-            most_recent = max(group, key=lambda x: x.timestamp)
-            deduplicated.append(most_recent)
-
-        # Sort by timestamp for chronological order
-        deduplicated.sort(key=lambda x: x.timestamp)
-
-        return deduplicated
-
-    def _generate_field_daily_values(self, year: int, field: str) -> Optional[List]:
-        """
-        Generate daily values for a single field for a given year.
-
-        For every calendar day in the year, assigns the most recent filed value
-        as of that date (forward-fill logic).
-
-        :param year: Year to generate data for (e.g., 2024)
-        :param field: XBRL field name (e.g., 'CashAndCashEquivalentsAtCarryingValue')
-        :return: List of daily values (one per day of the year), or None if field unavailable
-        """
-        try:
-            # Get and deduplicate datapoints
-            raw_dps = self.get_dps(field)
-            dps = self._deduplicate_dps(raw_dps)
-
-            # Generate daily values for the year
-            start_date = dt.date(year, 1, 1)
-            end_date = dt.date(year, 12, 31)
-
-            values = []
-            current_value = None
-            current_day = start_date
-            dp_index = 0
-
-            while current_day <= end_date:
-                # Update current_value if a new filing was released on or before this day
-                while dp_index < len(dps) and dps[dp_index].timestamp <= current_day:
-                    current_value = dps[dp_index].value
-                    dp_index += 1
-
-                # Assign value for this day (None if no filing has been released yet)
-                values.append(current_value)
-                current_day += dt.timedelta(days=1)
-
-            return values
-
-        except KeyError as error:
-            # Field not available for this company
-            self._log_error(field, 'FieldNotAvailable', str(error))
-            print(f"  ⚠ Field '{field}' not available (logged)")
-            return None
-
-        except requests.RequestException as error:
-            # Network or API error
-            self._log_error(field, 'RequestException', str(error))
-            print(f"  ⚠ Request failed for '{field}' (logged)")
-            return None
-
-        except Exception as error:
-            # Unexpected error
-            self._log_error(field, 'UnexpectedException', str(error))
-            print(f"  ⚠ Unexpected error for '{field}': {error} (logged)")
-            return None
-
-    def generate_year_data(self, year: int, fields: List[str], symbol: str) -> None:
-        """
-        Generate daily values for a given year and multiple fields, save to Parquet.
-
-        For every calendar day in the year, assigns the most recent filed value
-        as of that date (forward-fill logic) for each field.
-
-        :param year: Year to generate data for (e.g., 2024)
-        :param fields: List of XBRL field names (e.g., ['CashAndCashEquivalentsAtCarryingValue', 'Assets'])
-        :param symbol: Stock symbol (e.g., 'AAPL')
-        """
-        # Update symbol if not set during initialization
-        if not self.symbol:
-            self.symbol = symbol
-
-        # Generate date range for the year
+        # Define date range
         start_date = dt.date(year, 1, 1)
         end_date = dt.date(year, 12, 31)
+        
+        # Load master calendar and merge
+        calendar_lf: pl.LazyFrame = (
+            pl.scan_parquet(self.calendar_path)
+            .filter(pl.col("Date").is_between(start_date, end_date))
+            .sort('Date')
+            .lazy()
+        )
 
-        dates = []
-        current_day = start_date
-        while current_day <= end_date:
-            dates.append(current_day.isoformat())
-            current_day += dt.timedelta(days=1)
+        # Main loop
+        for field_name in fields:
+            dps = self.get_value_tuple(field_name)
 
-        # Create DataFrame starting with date column
-        data = {'date': dates}
-        successful_fields = 0
-        failed_fields = 0
-
-        # Process each field
-        for field in fields:
-            print(f"Processing field: {field}")
-            values = self._generate_field_daily_values(year, field)
-
-            if values is not None:
-                data[field] = values
-                successful_fields += 1
+            # --- DEBUG START ---
+            if field_name == "Assets":
+                print(f"--- INSPECTING {field_name} ---")
+                # Print the first 3 tuples to see the dates
+                print(f"First 3 Raw DPs: {dps[:3]}") 
+                
+                # Check for Look-Ahead Bias
+                first_date = dps[0][0]
+                first_val = dps[0][1]
+                print(f"Data starts on: {first_date} with value {first_val}")
+                
+                if first_date > dt.date(2024, 1, 1):
+                    print("⚠️ ALERT: Data starts AFTER Jan 1. Result should be NULL.")
+                else:
+                    print("✅ OK: Data starts BEFORE Jan 1. Forward fill from previous year is expected.")
+            # --- DEBUG END ---
+            
+            if not dps:
+                calendar_lf = calendar_lf.with_columns(
+                    pl.lit(None, dtype=pl.Float64)
+                    .alias(field_name)
+                )
+            
             else:
-                # Add None values for this field if it fails
-                data[field] = [None] * len(dates)
-                failed_fields += 1
+                tmp_lf = (
+                    pl.DataFrame(
+                        dps,
+                        schema=['Date', field_name],
+                        orient='row'
+                    )
+                    .with_columns(
+                        pl.col(field_name).cast(pl.Float64)
+                    )
+                    .sort('Date')
+                    .drop_nulls(subset=[field_name])
+                    .lazy()
+                )
 
-        # Create Polars DataFrame with explicit schema
-        df = pl.DataFrame(data)
+                calendar_lf = calendar_lf.join_asof(
+                    tmp_lf,
+                    on='Date',
+                    strategy='backward'
+                )
+        
+        result = calendar_lf.collect()
+        self.fields_df = result
 
-        # Cast columns to appropriate types
-        # Date column: convert ISO string to Date
-        # All field columns: cast to Float64 (financial values)
-        cast_expressions = [
-            pl.col('date').str.to_date(format='%Y-%m-%d')
-        ]
+        return result
 
-        # Add cast expressions for all fundamental fields
-        for field in fields:
-            cast_expressions.append(
-                pl.col(field).cast(pl.Float64)
-            )
-
-        df = df.with_columns(cast_expressions)
+    def store_fields(self, symbol: str, year: int, fields: List[str]):
+        if not self.symbol:
+            self.symbol = symbol
+        
+        if not isinstance(self.fields_df, pl.DataFrame):
+            self.fields_df = self.collect_fields(year=year, fields=fields)
 
         # Save to Parquet
-        output_dir = Path(f"data/fundamental/{symbol}/{year}")
+        output_dir = self.output_dir / Path(f"{symbol}/{year}")
         output_dir.mkdir(parents=True, exist_ok=True)
 
         output_file = output_dir / "fundamental.parquet"
-        df.write_parquet(output_file, compression='zstd')
+        self.fields_df.write_parquet(output_file, compression='zstd')
 
-        print(f"\n✓ Saved fundamental data for {symbol} ({year})")
-        print(f"  Successfully processed: {successful_fields}/{len(fields)} fields")
-        if failed_fields > 0:
-            print(f"  Failed fields: {failed_fields} (see logs in {self.log_dir})")
-        print(f"  Output: {output_file}")
-
-
-
+        print(f"Fundamental fields for {symbol} stored in {output_file} successful!")
 
 
 # Example usage
@@ -322,4 +299,6 @@ if __name__ == "__main__":
     # Generate and save year data for all fields
     print(f"Generating daily data for {symbol} {year} with {len(fields)} fields...")
     print("=" * 60)
-    fund.generate_year_data(year=year, fields=fields, symbol=symbol)
+    res = fund.collect_fields(year=year, fields=fields)
+    print(res)
+    fund.store_fields(symbol, year, fields)
