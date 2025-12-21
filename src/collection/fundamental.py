@@ -212,23 +212,6 @@ class Fundamental:
         # Main loop
         for field_name in fields:
             dps = self.get_value_tuple(field_name)
-
-            # --- DEBUG START ---
-            if field_name == "Assets":
-                print(f"--- INSPECTING {field_name} ---")
-                # Print the first 3 tuples to see the dates
-                print(f"First 3 Raw DPs: {dps[:3]}") 
-                
-                # Check for Look-Ahead Bias
-                first_date = dps[0][0]
-                first_val = dps[0][1]
-                print(f"Data starts on: {first_date} with value {first_val}")
-                
-                if first_date > dt.date(2024, 1, 1):
-                    print("⚠️ ALERT: Data starts AFTER Jan 1. Result should be NULL.")
-                else:
-                    print("✅ OK: Data starts BEFORE Jan 1. Forward fill from previous year is expected.")
-            # --- DEBUG END ---
             
             if not dps:
                 calendar_lf = calendar_lf.with_columns(
