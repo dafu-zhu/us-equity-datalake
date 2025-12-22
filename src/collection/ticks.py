@@ -26,13 +26,18 @@ class Ticks:
             "APCA-API-SECRET-KEY": ALPACA_SECRET
         }
 
-        self.calendar_path = Path("data/calendar/master.parquet")
+        self.calendar_dir = Path("data/calendar")
+        self.calendar_dir.mkdir(parents=True, exist_ok=True)
         self.daily_ticks_df = None
         self.minute_ticks_df = None
         
         # Store path
-        self.daily_path = Path("data/raw/ticks/daily")
-        self.minute_path = Path("data/raw/ticks/minute")
+        self.daily_dir = Path("data/raw/ticks/daily")
+        self.minute_dir = Path("data/raw/ticks/minute")
+        self.recent_dir = Path("data/raw/ticks/recent")
+        self.daily_dir.mkdir(parents=True, exist_ok=True)
+        self.minute_dir.mkdir(parents=True, exist_ok=True)
+        self.recent_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
     def get_trade_day_range(trade_day: str | dt.date) -> Tuple[str]:
@@ -93,17 +98,38 @@ class Ticks:
         :param end: End datetime in UTC (format: "2025-01-03T21:00:00Z")
         :param timeframe: Alpaca timeframe (e.g., "1Min", "1Day", "1Hour")
         :return: List of dictionaries with OHLCV data
+        Example:
+        {"c": 184.25, "h": 185.88, "l": 183.43, "n": 656956, "o": 184.22, "t": "2024-01-03T05:00:00Z", "v": 58418916, "vw": 184.319693}
         """
         symbol = str(self.symbol).upper()
         url = f"https://data.alpaca.markets/v2/stocks/bars?symbols={symbol}&timeframe={timeframe}&start={start}&end={end}&limit=10000&adjustment=raw&feed=sip&sort=asc"
 
-        response = requests.get(url, headers=self.headers)
+        try:
+            response = requests.get(url, headers=self.headers)
 
-        # Rate limit: 200/m or 10/s
-        time.sleep(0.1)
+            # Rate limit: 200/m or 10/s
+            time.sleep(0.1)
 
-        bars = response.json()['bars'][self.symbol]
-        return bars
+            # 1. Check HTTP Status Code
+            if response.status_code != 200:
+                print(f"API Error [{response.status_code}] for {symbol}: {response.text}")
+                return []
+
+            data = response.json()
+
+            # 2. Check if 'bars' key exists and is not None
+            if 'bars' not in data or data['bars'] is None:
+                return []
+            
+            # 3. Check if the specific symbol exists in the bars
+            if symbol not in data['bars']:
+                return []
+
+            return data['bars'][symbol]
+        
+        except Exception as e:
+            print(f"Request failed for {symbol}: {e}")
+            return []
 
     def get_minute(self, trade_day: str | dt.date) -> List[dict]:
         """
@@ -174,8 +200,9 @@ class Ticks:
         ticks_data = [asdict(dp) for dp in parsed_ticks]
 
         # Merge with master calendar
+        calendar_path = self.calendar_dir / "master.parquet"
         calendar_lf = (
-            pl.scan_parquet(self.calendar_path)
+            pl.scan_parquet(calendar_path)
             .filter(pl.col('Date').is_between(start_date, end_date))
             .sort('Date')
             .lazy()
@@ -213,7 +240,7 @@ class Ticks:
             self.daily_ticks_df: pl.DataFrame = self.collect_daily_ticks(year=year)
 
         # Define storage path
-        dir_path = self.daily_path / f"{self.symbol}/{year}"
+        dir_path = self.daily_dir / f"{self.symbol}/{year}"
         dir_path.mkdir(parents=True, exist_ok=True)
 
         # Write to Parquet file
@@ -266,7 +293,7 @@ class Ticks:
         year = date_obj.strftime('%Y')
         month = date_obj.strftime('%m')
         day = date_obj.strftime('%d')
-        dir_path = self.minute_path / f"{self.symbol}/{year}/{month}/{day}"
+        dir_path = self.minute_dir / f"{self.symbol}/{year}/{month}/{day}"
         dir_path.mkdir(parents=True, exist_ok=True)
 
         # Write to Parquet file
@@ -274,6 +301,51 @@ class Ticks:
         self.minute_ticks_df.write_parquet(file_path, compression='zstd')
 
         print(f"Stored {len(self.minute_ticks_df)} minute ticks to {file_path}")
+
+    def update_liquidity_cache(self) -> bool:
+        """
+        Fetches the last 3 months of daily data and saves it to a 
+        temporary 'recent' folder for liquidity scoring.
+
+        If success, return True; otherwise return False
+        """
+        try:
+            # Define 3-month window (UTC)
+            end_dt = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1) 
+            start_dt = end_dt - dt.timedelta(weeks=12) 
+            
+            start_str = start_dt.isoformat().replace("+00:00", "Z")
+            end_str = end_dt.isoformat().replace("+00:00", "Z")
+
+            # Fetch Data
+            raw_bars = self.get_ticks(start_str, end_str, timeframe="1Day")
+            
+            if not raw_bars:
+                return False
+
+            # Parse and Format for Liquidity Calculation
+            parsed_bars = self.parse_ticks(raw_bars)
+            bars_data = [asdict(dp) for dp in parsed_bars]
+            
+            # Create DataFrame
+            df = (
+                pl.LazyFrame(bars_data)
+                .with_columns([
+                    pl.col("timestamp").str.to_date(format='%Y-%m-%dT%H:%M:%S').alias("Date"),
+                    pl.col("close").cast(pl.Float64),
+                    pl.col("volume").cast(pl.Int64),
+                    pl.lit(self.symbol).alias("symbol")
+                ])
+                .select(["Date", "symbol", "close", "volume"])
+            ).collect()
+
+            # Save to "Recent"
+            df.write_parquet(self.recent_dir / f"{self.symbol}.parquet")
+            return True
+
+        except Exception as e:
+            print(f"Error fetching recent data for {self.symbol}: {e}")
+            return False
 
 
 if __name__ == "__main__":
@@ -287,7 +359,7 @@ if __name__ == "__main__":
     trade_day = "2025-01-03"
     minutes = ticks.collect_minute_ticks(trade_day)
     ticks.store_minute_ticks(trade_day)
-    minute_df = pl.read_parquet(ticks.minute_path/"AAPL/2025/01/03/ticks.parquet")
+    minute_df = pl.read_parquet(ticks.minute_dir/"AAPL/2025/01/03/ticks.parquet")
     print(minute_df)
 
     # Example 2: Fetch and store daily data for a full year
@@ -296,5 +368,5 @@ if __name__ == "__main__":
     year = 2024
     daily_bars = ticks.collect_daily_ticks(year)
     ticks.store_daily_ticks(year)
-    daily_df = pl.read_parquet(ticks.daily_path/"AAPL/2024/ticks.parquet")
+    daily_df = pl.read_parquet(ticks.daily_dir/"AAPL/2024/ticks.parquet")
     print(daily_df)
