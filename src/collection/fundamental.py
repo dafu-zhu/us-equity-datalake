@@ -8,6 +8,7 @@ from collections import defaultdict
 import polars as pl
 import json
 import logging
+from utils.logger import setup_logger
 
 HEADER = {'User-Agent': 'name@example.com'}
 
@@ -25,24 +26,11 @@ class Fundamental:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Setup logger
-        self.logger = logging.getLogger(f"fundamental.{cik}")
-        self.logger.setLevel(logging.WARNING)
-
-        # Create file handler with daily rotation
-        log_date = dt.datetime.now().strftime('%Y-%m-%d')
-        log_file = self.log_dir / f"errors_{log_date}.log"
-        handler = logging.FileHandler(log_file)
-        handler.setLevel(logging.WARNING)
-
-        # Create formatter
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        self.logger = setup_logger(
+            name=f"fundamental.{cik}",
+            log_dir=self.log_dir,
+            level=logging.WARNING
         )
-        handler.setFormatter(formatter)
-
-        # Add handler if not already added
-        if not self.logger.handlers:
-            self.logger.addHandler(handler)
 
     def get_facts(self, field: str, sleep=True) -> List[dict]:
         """

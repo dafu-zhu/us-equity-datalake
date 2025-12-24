@@ -1,4 +1,5 @@
 import os
+import logging
 import requests
 import time
 import zoneinfo
@@ -10,12 +11,24 @@ import polars as pl
 from pathlib import Path
 
 from collection.models import TickField, TickDataPoint
+from utils.logger import LoggerFactory
 
 load_dotenv()
+
+# Shared logger
+_logger_factory = LoggerFactory(
+    log_dir='data/logs/ticks',
+    level=logging.INFO,
+    daily_rotation=True,
+    console_output=False
+)
 
 class Ticks:
     def __init__(self, symbol: str) -> None:
         self.symbol = symbol
+
+        # Setup logger
+        self.logger = _logger_factory.get_logger(name=f'collection.ticks.{symbol}')
 
         # Load Alpaca API key and secrets
         ALPACA_KEY = os.getenv("ALPACA_API_KEY")
@@ -30,7 +43,7 @@ class Ticks:
         self.calendar_dir.mkdir(parents=True, exist_ok=True)
         self.daily_ticks_df = None
         self.minute_ticks_df = None
-        
+
         # Store path
         self.daily_dir = Path("data/raw/ticks/daily")
         self.minute_dir = Path("data/raw/ticks/minute")
@@ -131,7 +144,7 @@ class Ticks:
                     df.write_parquet(save_path)
                     has_data = True
                 except Exception as error:
-                    print(f"Failed to process {sym}: {error}")
+                    self.logger.error(f"Failed to process {sym}: {error}")
                     continue
                 
             return has_data
@@ -170,9 +183,9 @@ class Ticks:
 
                 # Fetch Data
                 response = requests.get(base_url, headers=self.headers, params=params)
-                
+
                 if response.status_code != 200:
-                    print(f"Error fetching chunk {i}: {response.status_code}, {response.text}")
+                    self.logger.error(f"Error fetching chunk {i}: {response.status_code}, {response.text}")
                     continue
 
                 data = response.json()
@@ -191,13 +204,13 @@ class Ticks:
                     if not bars:
                         continue
                     success_flag = _process_ticks(bars=bars)
-                
-                print(f"Chunk {i//100+1} successful!")
+
+                self.logger.info(f"Chunk {i//100+1} successful!")
 
             return success_flag
 
         except Exception as e:
-            print(f"Error during bulk fetch: {e}")
+            self.logger.error(f"Error during bulk fetch: {e}")
             return False
 
     # ==========================================
@@ -230,7 +243,7 @@ class Ticks:
 
             # 1. Check HTTP Status Code
             if response.status_code != 200:
-                print(f"API Error [{response.status_code}] for {symbol}: {response.text}")
+                self.logger.error(f"API Error [{response.status_code}] for {symbol}: {response.text}")
                 return []
 
             data = response.json()
@@ -244,9 +257,9 @@ class Ticks:
                 return []
 
             return data['bars'][symbol]
-        
+
         except Exception as e:
-            print(f"Request failed for {symbol}: {e}")
+            self.logger.error(f"Request failed for {symbol}: {e}")
             return []
 
     def get_minute(self, trade_day: str | dt.date) -> List[dict]:
@@ -365,7 +378,7 @@ class Ticks:
         file_path = dir_path / 'ticks.parquet'
         self.daily_ticks_df.write_parquet(file_path, compression='zstd')
 
-        print(f"Stored {len(self.daily_ticks_df)} daily ticks to {file_path}")
+        self.logger.info(f"Stored {len(self.daily_ticks_df)} daily ticks to {file_path}")
     
     def collect_minute_ticks(self, trade_day: str) -> pl.DataFrame:
         """
@@ -418,7 +431,7 @@ class Ticks:
         file_path = dir_path / 'ticks.parquet'
         self.minute_ticks_df.write_parquet(file_path, compression='zstd')
 
-        print(f"Stored {len(self.minute_ticks_df)} minute ticks to {file_path}")
+        self.logger.info(f"Stored {len(self.minute_ticks_df)} minute ticks to {file_path}")
 
 
 
