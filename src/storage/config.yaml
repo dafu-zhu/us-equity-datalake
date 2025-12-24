@@ -1,0 +1,21 @@
+client:
+  region_name: us-east-2
+  max_pool_connections: 50
+  connect_timeout: 60
+  read_timeout: 60
+
+  retries:
+    mode: standard
+    total_max_attempts: 5
+
+  s3:
+    addressing_style: virtual
+    payload_signing_enabled: True
+    us_east_1_regional_endpoint: regional
+
+  tcp_keepalive: True
+  request_min_compression_size_bytes: 10240
+  disable_request_compression: False
+  request_checksum_calculation: when_supported
+  response_checksum_validation: when_supported
+  
