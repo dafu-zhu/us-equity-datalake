@@ -8,6 +8,7 @@ dependencies = [
     "boto3>=1.42.14",
     "dotenv>=0.9.9",
     "polars>=1.36.1",
+    "pyyaml>=6.0.3",
     "requests>=2.32.5",
     "tqdm>=4.67.1",
     "yfinance>=0.2.66",
