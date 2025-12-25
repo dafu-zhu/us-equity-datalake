@@ -6,12 +6,86 @@ Fetches all actively traded US common stocks from SEC EDGAR API.
 """
 import io
 import os
+import re
 import requests
 import pandas as pd
 from datetime import datetime
 from ftplib import FTP
 
-def fetch_all_stocks() -> pd.DataFrame:
+
+def is_common_stock(name: str) -> bool:
+    """
+    Determines if a security is a common stock based on its name.
+
+    Returns:
+        True if the security is a common stock, False otherwise.
+    """
+    if pd.isna(name) or not isinstance(name, str):
+        return False
+
+    # Direct exclusions (simple substring matching)
+    direct_exclusions = [
+        "Preferred",
+        "Preference",
+        "Pfd Ser",
+        "Series",
+        "Subordinate",
+        "Notes",
+        "Limited Partner",
+        "Beneficial Interest",
+        "Cmn Shs of BI",
+        "Closed End Fund",
+        "Depositary Share",
+        "Depositary Receipt",
+        "Redeemable",
+        "Perpetual",
+        "Convertible"
+    ]
+
+    for keyword in direct_exclusions:
+        if keyword in name:
+            return False
+
+    # Word boundary exclusions (must match whole words to avoid false positives)
+    # e.g., "Unit" should match "Units" but not "Uniti"
+    word_boundary_exclusions = [
+        r'\bUnits?\b',      # Matches "Unit" or "Units"
+        r'\bRights?\b',     # Matches "Right" or "Rights"
+        r'\bWarrants?\b',   # Matches "Warrant" or "Warrants"
+    ]
+
+    for pattern in word_boundary_exclusions:
+        if re.search(pattern, name):
+            return False
+
+    # Case-sensitive check
+    for keyword in ["ADS", "ADR", "ETN"]:
+        if keyword in name:
+            return False
+
+    # Check for percentage symbol
+    if "%" in name:
+        return False
+
+    # Check for Closed End Fund patterns
+    trust_fund_keywords = ["Trust", "Fund"]
+    has_trust_fund = any(keyword in name for keyword in trust_fund_keywords)
+
+    is_debt = False
+    if has_trust_fund:
+        debt_keywords = ["Income", "Municipal", "Bond", "Term", "Securities", "Premium", "Rate", "Yield"]
+        is_debt = any(keyword in name for keyword in debt_keywords)
+
+    reit_keywords = ["Realty", "Real Estate", "REIT"]
+    is_reit = any(keyword in name for keyword in reit_keywords)
+
+    if not is_reit and is_debt:
+        return False
+
+    return True
+
+
+def fetch_all_stocks(with_filter=True) -> pd.DataFrame:
     """
     Connects to ftp.nasdaqtrader.com to fetch the raw ticker list.
     """
@@ -28,7 +102,6 @@ def fetch_all_stocks() -> pd.DataFrame:
         ftp.cwd(ftp_dir)
         
         # Download file to memory (BytesIO)
-        # This is faster than writing to disk and reading back
         print(f"Downloading {ftp_file}...")
         byte_buffer = io.BytesIO()
         
@@ -43,24 +116,25 @@ def fetch_all_stocks() -> pd.DataFrame:
         # Funny enough: without specifying dtype, pandas recognize 'NaN' as null, which is in fact 'Nano Labs Ltd'
         df = pd.read_csv(byte_buffer, sep='|', dtype={'Symbol': str}, keep_default_na=False, na_values=[''])
         
-        # Remove the file footer (usually contains file creation timestamp)
+        # Remove the file footer
         df = df[:-1]
         
-        # FILTER: Exclude ETFs
-        # The 'ETF' column is 'Y' for ETFs and 'N' for stocks
-        if 'ETF' in df.columns:
-            df = df[df['ETF'] == 'N']
-            
-        # FILTER: Exclude Test Issues
-        if 'Test Issue' in df.columns:
-            df = df[df['Test Issue'] == 'N']
+        if with_filter:
+            # FILTER: Exclude ETFs
+            if 'ETF' in df.columns:
+                df = df[df['ETF'] == 'N']
+                
+            # FILTER: Exclude Test Issues
+            if 'Test Issue' in df.columns:
+                df = df[df['Test Issue'] == 'N']
 
-        # Rename columns to match your system
-        df = df.rename(columns={'Symbol': 'Ticker', 'Security Name': 'Name'})
-        
-        # Additional Cleanup (Preferreds, Warrants, Rights)
-        df = df[~df['Ticker'].str.contains(r'[-\.](?:W|R|P|U)$', regex=True, na=False)]
-        df = df[~df['Ticker'].str.contains(r'[$~\^\.]', regex=True, na=False)]
+            # Rename columns to match your system
+            df = df.rename(columns={'Symbol': 'Ticker', 'Security Name': 'Name'})
+
+            # FILTER: Exclude non common stocks
+            print(f"Before common stock filter: {len(df)} securities")
+            df = df[df['Name'].apply(is_common_stock)]
+            print(f"After common stock filter: {len(df)} securities")
 
         # Remove duplicates
         df = df.drop_duplicates(subset=['Ticker'], keep='first')
@@ -85,5 +159,44 @@ def fetch_all_stocks() -> pd.DataFrame:
     
 
 if __name__ == "__main__":
+    import time
+    # Test the is_common_stock helper function
+    test_cases = [
+        ("FTAI Aviation Ltd. - 9.500% Fixed-Rate Reset Series D Cumulative Perpetual Redeemable Preferred Shares", False),
+        ("Bank of America Corporation Non Cumulative Perpetual Conv Pfd Ser L", False),
+        ("EPR Properties Series E Cumulative Conv Pfd Shs Ser E", False),
+        ("Axiom Intelligence Acquisition Corp 1 - Right", False),
+        ("Bitcoin Infrastructure Acquisition Corp Ltd. - Units", False),
+        ("Digi Power X Inc. - Common Subordinate Voting Shares", False),
+        ("Empire State Realty OP, L.P. Series ES Operating Partnership Units Representing Limited Partnership Interests", False),
+        ("Eaton Vance Short Diversified Income Fund Eaton Vance Short Duration Diversified Income Fund Common Shares of Beneficial Interest", False),
+        ("Fidus Investment Corporation - Closed End Fund", False),
+        ("New Oriental Education & Technology Group, Inc. Sponsored ADR representing 10 Ordinary Share (Cayman Islands)", False),
+        ("MicroSectors FANG  Index -3X Inverse Leveraged ETNs due January 8, 2038", False),
+        ("Franklin BSP Realty Trust, Inc. 7.50% Series E Cumulative Redeemable Preferred Stock", False),
+        ("Fortress Biotech, Inc. - 9.375% Series A Cumulative Redeemable Perpetual Preferred Stock", False),
+        ("Shift4 Payments, Inc. 6.00% Series A Mandatory Convertible Preferred Stock", False),
+        ("Structured Products Corp 8.205% CorTS 8.205% Corporate Backed Trust Securities (CorTS)", False),
+        ("Federated Hermes Premier Municipal Income Fund", False),
+        ("Credit Suisse High Yield Credit Fund Common Stock", False),
+        ("BlackRock Municipal 2030 Target Term Trust", False),
+        ("Saba Capital Income & Opportunities Fund SBI", False),
+        ("BlackRock Investment Quality Municipal Trust Inc. (The)", False),
+        ("Uniti Group Inc. - Common Stock", True),
+        ("Universal Health Realty Income Trust Common Stock", True)
+    ]
+
+    print("Testing is_common_stock() function:")
+    print("-" * 70)
+    for name, expected in test_cases:
+        result = is_common_stock(name)
+        status = "✓" if result == expected else "✗"
+        print(f"{status} {name:<50} -> {result}")
+    print("-" * 70)
+    print()
+
+    # Fetch actual stock data
+    start = time.perf_counter()
     result = fetch_all_stocks()
     print(result.tail())
+    print(f"Execution time: {(time.perf_counter() - start):.2f} seconds")
