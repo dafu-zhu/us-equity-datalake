@@ -32,18 +32,10 @@ class Fundamental:
             level=logging.WARNING
         )
 
-    def get_facts(self, field: str, sleep=True) -> List[dict]:
-        """
-        Get the complete historical facts of a company using SEC XBRL
-
-        :param cik: Company identifier
-        :type cik: str
-        :param field: Accounting data to fetch
-        :type field: str
-        :raises requests.RequestException: If HTTP request fails
-        :raises KeyError: If field is not available for this company
-        :raises ValueError: If data format is unexpected
-        """
+        # Request response
+        self.req_response = self._req_response()
+    
+    def _req_response(self) -> dict:
         cik_padded = str(self.cik).zfill(10)
         url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_padded}.json"
 
@@ -55,17 +47,29 @@ class Fundamental:
             raise requests.RequestException(f"Failed to fetch data for CIK {cik_padded}: {error}")
         except json.JSONDecodeError as error:
             raise ValueError(f"Invalid JSON response for CIK {cik_padded}: {error}")
+        
+        return res
 
-        # Avoid reaching api rate limit (10/s)
-        if sleep:
-            time.sleep(0.1)
+    def get_gaap(self, field: str) -> List[dict]:
+        """
+        Get the complete historical facts of a company using SEC XBRL
+
+        :param cik: Company identifier
+        :type cik: str
+        :param field: Accounting data to fetch
+        :type field: str
+        :raises requests.RequestException: If HTTP request fails
+        :raises KeyError: If field is not available for this company
+        :raises ValueError: If data format is unexpected
+        """
+        res = self.req_response
 
         # Check if facts and us-gaap exist
         if 'facts' not in res:
-            raise KeyError(f"No 'facts' data found for CIK {cik_padded}")
+            raise KeyError(f"No 'facts' data found for CIK {self.cik}")
 
         if 'us-gaap' not in res['facts']:
-            raise KeyError(f"No 'us-gaap' data found for CIK {cik_padded}")
+            raise KeyError(f"No 'us-gaap' data found for CIK {self.cik}")
 
         gaap = res['facts']['us-gaap']
 
@@ -73,30 +77,70 @@ class Fundamental:
         if field not in gaap:
             available_fields = list(gaap.keys())
             raise KeyError(
-                f"Field '{field}' not available for CIK {cik_padded}. "
+                f"Field '{field}' not available for CIK {self.cik}. "
                 f"Available fields: {len(available_fields)} total"
             )
 
         # Check if USD units exist for this field
         if 'units' not in gaap[field]:
-            raise KeyError(f"No 'units' data found for field '{field}' in CIK {cik_padded}")
+            raise KeyError(f"No 'units' data found for field '{field}' in CIK {self.cik}")
 
         if 'USD' not in gaap[field]['units']:
             available_units = list(gaap[field]['units'].keys())
             raise KeyError(
-                f"USD units not available for field '{field}' in CIK {cik_padded}. "
+                f"USD units not available for field '{field}' in CIK {self.cik}. "
                 f"Available units: {available_units}"
             )
 
         usd_result = gaap[field]['units']['USD']
 
         return usd_result
+    
+    def get_dei(self, field:str) -> List[dict]:
+        res = self.req_response
 
-    def get_dps(self, field: str) -> List[FndDataPoint]:
+        # Check if facts and us-gaap exist
+        if 'facts' not in res:
+            raise KeyError(f"No 'facts' data found for CIK {self.cik}")
+
+        if 'dei' not in res['facts']:
+            raise KeyError(f"No 'dei' data found for CIK {self.cik}")
+        
+        dei = res['facts']['dei']
+
+        # Check if field exists
+        if field not in dei:
+            available_fields = list(dei.keys())
+            raise KeyError(
+                f"Field '{field}' not available for CIK {self.cik}. "
+                f"Available fields: {len(available_fields)} total"
+            )
+        
+        if 'units' not in dei[field]:
+            raise KeyError(f"No 'units'/'shares' data found for field '{field}' in CIK {self.cik}")
+        
+        if 'USD' in dei[field]['units']:
+            result = dei[field]['units']['USD']
+        elif 'shares' in dei[field]['units']:
+            result = dei[field]['units']['shares']
+        else:
+            raise KeyError(
+                f"USD units not available for field '{field}' in CIK {self.cik}. "
+            )
+        
+        return result
+
+
+    def get_dps(self, field: str, location: str) -> List[FndDataPoint]:
         """
         Transform raw data point into FndDataPoint object
         """
-        raw_data = self.get_facts(field)
+        if location == "dei":
+            raw_data = self.get_dei(field)
+        elif location == "us-gaap":
+            raw_data = self.get_gaap(field)
+        else:
+            raise ValueError(f"Expected location 'dei' or 'us-gaap', get {location} instead")
         
         dps = []
         for dp in raw_data:
@@ -121,20 +165,21 @@ class Fundamental:
 
         return dps
     
-    def get_value_tuple(self, field: str) -> List[Tuple[dt.date, float]]:
+    def get_value_tuple(self, field: str, location: str) -> List[Tuple[dt.date, float]]:
         """
         Process the result of get_dps, transform list of FndDataPoint into 
         a list of tuple in order to fit in dataframe
         
         :param field: Fundamental field name
         :type field: str
+        :param location: 'dei' or 'us-gaap'
         :return: list of tuples with (date, value), ordered in date
         :rtype: List[Tuple[date, float]]
 
         Example: [(date(2024, 9, 1), 9.1), (date(2024, 12, 1), 12.1)]
         """
         try:
-            dps = self.get_dps(field)
+            dps = self.get_dps(field, location)
             value_tuples = []
             for dp in dps:
                 date: dt.date = dp.timestamp
@@ -150,7 +195,6 @@ class Fundamental:
             self.logger.warning(
                 f"Field not available - Symbol: {self.symbol}, Field: {field}, Error: {error}"
             )
-            print(f"  ⚠ Field '{field}' not available (logged)")
             return []
 
         except requests.RequestException as error:
@@ -158,7 +202,6 @@ class Fundamental:
             self.logger.error(
                 f"Request failed - Symbol: {self.symbol}, Field: {field}, Error: {error}"
             )
-            print(f"  ⚠ Request failed for '{field}' (logged)")
             return []
 
         except Exception as error:
@@ -167,10 +210,9 @@ class Fundamental:
                 f"Unexpected error - Symbol: {self.symbol}, Field: {field}, Error: {error}",
                 exc_info=True
             )
-            print(f"  ⚠ Unexpected error for '{field}': {error} (logged)")
             return []
 
-    def collect_fields(self, year: int, fields: List[str]) -> pl.DataFrame:
+    def collect_fields(self, year: int, fields: List[str], location: str) -> pl.DataFrame:
         """
         Collect multiple fields and put into one single dataframe
         
@@ -178,6 +220,7 @@ class Fundamental:
         :type year: int
         :param fields: what fields
         :type fields: List[str]
+        :param location: 'dei' or 'us-gaap'
         :return: dataframe with columns [Date, Field1, Field2, ...]
         :rtype: DataFrame
         """
@@ -195,7 +238,7 @@ class Fundamental:
 
         # Main loop
         for field_name in fields:
-            dps = self.get_value_tuple(field_name)
+            dps = self.get_value_tuple(field_name, location)
             
             if not dps:
                 calendar_lf = calendar_lf.with_columns(
