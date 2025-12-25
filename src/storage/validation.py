@@ -7,8 +7,8 @@ from utils.logger import setup_logger
 
 
 class Validator:
-    def __init__(self):
-        self.s3_client = S3Client().create()
+    def __init__(self, s3_client=None):
+        self.s3_client = s3_client or S3Client().client
         self.bucket_name = "us-equity-datalake"
         self.log_dir = Path("data/logs/validation")
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -17,6 +17,41 @@ class Validator:
             log_dir=self.log_dir,
             level=logging.WARNING
         )
+
+    def list_files_under_prefix(self, prefix: str) -> list[str]:
+        """
+        List all files (object keys) under a given S3 prefix
+
+        :param prefix: S3 prefix/directory to list (e.g., 'data/raw/fundamental')
+        :return: List of full S3 object keys under the prefix
+        """
+        files = []
+        continuation_token = None
+
+        while True:
+            # Build request params
+            params = {
+                'Bucket': self.bucket_name,
+                'Prefix': prefix
+            }
+            if continuation_token:
+                params['ContinuationToken'] = continuation_token
+
+            # List objects
+            response = self.s3_client.list_objects_v2(**params)
+
+            # Collect object keys
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    files.append(obj['Key'])
+
+            # Check for more pages
+            if response.get('IsTruncated'):
+                continuation_token = response['NextContinuationToken']
+            else:
+                break
+
+        return files
 
     def list_available_years(self, symbol: str, data_type: str) -> list:
         """
@@ -43,7 +78,7 @@ class Validator:
             }
             if continuation_token:
                 params['ContinuationToken'] = continuation_token
-            
+
             # List objects
             response = self.s3_client.list_objects_v2(**params)
 
@@ -56,7 +91,7 @@ class Validator:
                         year = int(parts[-2])
                         if year not in years:
                             years.append(year)
-            
+
             # Check for more pages
             if response.get('IsTruncated'):
                 continuation_token = response['NextContinuationToken']
@@ -88,7 +123,7 @@ class Validator:
                 raise ValueError(f'Failed to parse day, expected format YYYY-MM-DD, get {day}')
         elif data_type == 'fundamental':
             if year:
-                s3_key = f'data/raw/{data_type}/daily/{symbol}/{year}/{data_type}.parquet'
+                s3_key = f'data/raw/{data_type}/{symbol}/{year}/{data_type}.parquet'
             else:
                 raise ValueError('Expect input year')
         else:
@@ -121,3 +156,6 @@ if __name__ == '__main__':
     # Expected output
     # 0.229747585000041
     # 0.043064168999990216
+
+    files = vld.list_files_under_prefix('data/raw/fundamental')
+    print(len(files))
