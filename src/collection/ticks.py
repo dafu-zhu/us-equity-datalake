@@ -162,6 +162,7 @@ class Ticks:
             base_url = "https://data.alpaca.markets/v2/stocks/bars"
 
             success_flag = False
+            failed_chunks = []
 
             # Alpaca format (BRK.B)
             symbols = [s.replace('-', '.') for s in symbols]
@@ -169,6 +170,7 @@ class Ticks:
             for i in range(0, len(symbols), CHUNK_SIZE):
                 chunk = symbols[i:i + CHUNK_SIZE]
                 symbols_str = ",".join(chunk)
+                chunk_num = i // 100 + 1
 
                 params = {
                     "symbols": symbols_str,
@@ -176,36 +178,136 @@ class Ticks:
                     "start": start_str,
                     "end": end_str,
                     "limit": 10000,
-                    "adjustment": "raw",
+                    "adjustment": "all",  # Adjusted prices for daily data
                     "feed": 'sip',
                     "sort": "asc"
                 }
 
-                # Fetch Data
-                response = requests.get(base_url, headers=self.headers, params=params)
+                # Retry logic for failed chunks
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        # Fetch Data
+                        response = requests.get(base_url, headers=self.headers, params=params)
 
-                if response.status_code != 200:
-                    self.logger.error(f"Error fetching chunk {i}: {response.status_code}, {response.text}")
-                    continue
+                        if response.status_code == 429:
+                            # Rate limited - wait and retry
+                            wait_time = (2 ** attempt) * 2  # 2s, 4s, 8s
+                            self.logger.warning(f"Rate limited on chunk {chunk_num}, waiting {wait_time}s (attempt {attempt+1}/{max_retries})")
+                            time.sleep(wait_time)
+                            continue
+                        elif response.status_code != 200:
+                            self.logger.error(f"Error fetching chunk {chunk_num}: {response.status_code}, {response.text}")
+                            if attempt < max_retries - 1:
+                                time.sleep(2)
+                                continue
+                            else:
+                                failed_chunks.append((chunk_num, chunk))
+                                break
 
-                data = response.json()
-                bars = data.get("bars", {})
-                if not bars:
-                    continue
-                    
-                success_flag = _process_ticks(bars=bars)
-                
-                # Handle Pagination if necessary
-                while "next_page_token" in data and data["next_page_token"]:
-                    params["page_token"] = data["next_page_token"]
-                    response = requests.get(base_url, headers=self.headers, params=params)
-                    data = response.json()
-                    bars = data.get("bars", {})
-                    if not bars:
-                        continue
-                    success_flag = _process_ticks(bars=bars)
+                        data = response.json()
+                        bars = data.get("bars", {})
+                        if not bars:
+                            self.logger.warning(f"No bars returned for chunk {chunk_num}")
+                            break
 
-                self.logger.info(f"Chunk {i//100+1} successful!")
+                        success_flag = _process_ticks(bars=bars)
+
+                        # Handle Pagination if necessary
+                        while "next_page_token" in data and data["next_page_token"]:
+                            params["page_token"] = data["next_page_token"]
+                            response = requests.get(base_url, headers=self.headers, params=params)
+                            data = response.json()
+                            bars = data.get("bars", {})
+                            if not bars:
+                                break
+                            success_flag = _process_ticks(bars=bars)
+
+                        self.logger.info(f"Chunk {chunk_num} successful!")
+                        break  # Success, exit retry loop
+
+                    except Exception as e:
+                        self.logger.error(f"Exception fetching chunk {chunk_num}: {e}")
+                        if attempt < max_retries - 1:
+                            time.sleep(2)
+                            continue
+                        else:
+                            failed_chunks.append((chunk_num, chunk))
+                            break
+
+                # Rate limiting between chunks
+                time.sleep(0.5)
+
+            # Retry failed chunks symbol-by-symbol
+            if failed_chunks:
+                self.logger.warning(f"Retrying {len(failed_chunks)} failed chunks symbol-by-symbol...")
+                final_failed_symbols = []
+
+                for chunk_num, chunk in failed_chunks:
+                    self.logger.info(f"Processing failed chunk {chunk_num} ({len(chunk)} symbols) individually...")
+
+                    for symbol in chunk:
+                        # Try fetching individual symbol
+                        individual_params = {
+                            "symbols": symbol,
+                            "timeframe": "1Day",
+                            "start": start_str,
+                            "end": end_str,
+                            "limit": 10000,
+                            "adjustment": "all",  # Adjusted prices for daily data
+                            "feed": 'sip',
+                            "sort": "asc"
+                        }
+
+                        max_individual_retries = 2
+                        individual_success = False
+
+                        for retry in range(max_individual_retries):
+                            try:
+                                response = requests.get(base_url, headers=self.headers, params=individual_params)
+
+                                if response.status_code == 429:
+                                    wait_time = (retry + 1) * 2
+                                    time.sleep(wait_time)
+                                    continue
+                                elif response.status_code != 200:
+                                    if retry < max_individual_retries - 1:
+                                        time.sleep(1)
+                                        continue
+                                    break
+
+                                data = response.json()
+                                bars = data.get("bars", {})
+
+                                if bars and symbol in bars:
+                                    _process_ticks(bars=bars)
+                                    individual_success = True
+                                    self.logger.info(f"  ✓ {symbol}")
+                                    break
+                                else:
+                                    # No data for this symbol (possibly delisted/invalid)
+                                    self.logger.warning(f"  ✗ {symbol} - no data available")
+                                    break
+
+                            except Exception as e:
+                                self.logger.error(f"  ✗ {symbol} - exception: {e}")
+                                if retry < max_individual_retries - 1:
+                                    time.sleep(1)
+                                    continue
+                                break
+
+                        if not individual_success:
+                            final_failed_symbols.append(symbol)
+
+                        # Rate limit between individual requests
+                        time.sleep(0.3)
+
+                # Log final summary
+                if final_failed_symbols:
+                    self.logger.error(f"Failed to fetch {len(final_failed_symbols)} symbols after individual retries:")
+                    self.logger.error(f"  Failed symbols: {', '.join(final_failed_symbols[:50])}{'...' if len(final_failed_symbols) > 50 else ''}")
+                else:
+                    self.logger.info(f"All symbols from failed chunks successfully fetched individually!")
 
             return success_flag
 
@@ -239,7 +341,7 @@ class Ticks:
             response = requests.get(url, headers=self.headers)
 
             # Rate limit: 200/m or 10/s
-            time.sleep(0.1)
+            time.sleep(0.3)
 
             # 1. Check HTTP Status Code
             if response.status_code != 200:
@@ -272,15 +374,41 @@ class Ticks:
         start, end = self.get_trade_day_range(trade_day)
         return self.get_ticks(start, end, timeframe="1Min")
 
-    def get_daily(self, year: str | int) -> List[dict]:
+    def get_daily(self, year: str | int, adjustment: str = "all") -> List[dict]:
         """
-        Get daily OHLCV data for a full year.
+        Get daily OHLCV data for a full year with adjusted prices.
 
         :param year: Year as string or integer (e.g., "2024" or 2024)
+        :param adjustment: Price adjustment type - 'all' for split+dividend adjusted (default), 'raw' for unadjusted
         :return: List of dictionaries with OHLCV data
         """
         start, end = self.get_year_range(year)
-        return self.get_ticks(start, end, timeframe="1Day")
+
+        # Override timeframe-specific adjustment for daily data
+        symbol = str(self.symbol).upper()
+        url = f"https://data.alpaca.markets/v2/stocks/bars?symbols={symbol}&timeframe=1Day&start={start}&end={end}&limit=10000&adjustment={adjustment}&feed=sip&sort=asc"
+
+        try:
+            response = requests.get(url, headers=self.headers)
+            time.sleep(0.3)
+
+            if response.status_code != 200:
+                self.logger.error(f"API Error [{response.status_code}] for {symbol}: {response.text}")
+                return []
+
+            data = response.json()
+
+            if 'bars' not in data or data['bars'] is None:
+                return []
+
+            if symbol not in data['bars']:
+                return []
+
+            return data['bars'][symbol]
+
+        except Exception as e:
+            self.logger.error(f"Request failed for {symbol}: {e}")
+            return []
 
     def parse_ticks(self, ticks: List[dict]) -> List[TickDataPoint]:
         """
@@ -317,12 +445,12 @@ class Ticks:
     def collect_daily_ticks(self, year: int) -> pl.DataFrame:
         """
         Given a year, collect daily ticks of the symbol for that year with a dataframe
-        
+
         :param year: Specify trade year
         :type year: int
         """
         parsed_ticks: List[TickDataPoint] = self.parse_ticks(self.get_daily(year=year))
-        
+
         # Define date range
         start_date = dt.date(year, 1, 1)
         end_date = dt.date(year, 12, 31)
@@ -338,6 +466,23 @@ class Ticks:
             .sort('Date')
             .lazy()
         )
+
+        # Handle empty data case
+        if not ticks_data:
+            self.logger.warning(f"No data available for {self.symbol} in year {year}")
+            # Return calendar with null values for tick columns
+            result = calendar_lf.with_columns([
+                pl.lit(None).cast(pl.Float64).alias('open'),
+                pl.lit(None).cast(pl.Float64).alias('high'),
+                pl.lit(None).cast(pl.Float64).alias('low'),
+                pl.lit(None).cast(pl.Float64).alias('close'),
+                pl.lit(None).cast(pl.Int64).alias('volume'),
+                pl.lit(None).cast(pl.Int64).alias('num_trades'),
+                pl.lit(None).cast(pl.Float64).alias('vwap')
+            ]).collect()
+            self.daily_ticks_df = result
+            return result
+
         ticks_lf = (
             pl.DataFrame(ticks_data)
             .with_columns([
@@ -357,7 +502,7 @@ class Ticks:
 
         result = calendar_lf.collect()
         self.daily_ticks_df = result
-        
+
         return result
     
     def store_daily_ticks(self, year: int) -> None:
@@ -383,7 +528,7 @@ class Ticks:
     def collect_minute_ticks(self, trade_day: str) -> pl.DataFrame:
         """
         Given a trade day, collect the minute level tick data with dataframe
-        
+
         :param trade_day: In format 'YYYY-MM-DD'
         :type trade_day: str
         """
@@ -391,6 +536,32 @@ class Ticks:
 
         # Convert datapoints to dictionaries
         ticks_data = [asdict(dp) for dp in parsed_ticks]
+
+        # Handle empty data case
+        if not ticks_data:
+            self.logger.warning(f"No data available for {self.symbol} on {trade_day}")
+            # Return empty DataFrame with correct schema
+            df = pl.DataFrame({
+                'timestamp': [],
+                'open': [],
+                'high': [],
+                'low': [],
+                'close': [],
+                'volume': [],
+                'num_trades': [],
+                'vwap': []
+            }).with_columns([
+                pl.col('timestamp').cast(pl.Datetime),
+                pl.col('open').cast(pl.Float64),
+                pl.col('high').cast(pl.Float64),
+                pl.col('low').cast(pl.Float64),
+                pl.col('close').cast(pl.Float64),
+                pl.col('volume').cast(pl.Int64),
+                pl.col('num_trades').cast(pl.Int64),
+                pl.col('vwap').cast(pl.Float64)
+            ])
+            self.minute_ticks_df = df
+            return df
 
         # Create DataFrame with appropriate schema based on storage type
         df = pl.DataFrame(ticks_data).with_columns([
@@ -406,7 +577,7 @@ class Ticks:
 
         # No need to merge with master cal
         self.minute_ticks_df = df
-        
+
         return df
 
     def store_minute_ticks(self, trade_day: str) -> None:
