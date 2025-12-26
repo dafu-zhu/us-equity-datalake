@@ -81,20 +81,23 @@ class Fundamental:
                 f"Available fields: {len(available_fields)} total"
             )
 
-        # Check if USD units exist for this field
+        # Check if units exist for this field
         if 'units' not in gaap[field]:
             raise KeyError(f"No 'units' data found for field '{field}' in CIK {self.cik}")
 
-        if 'USD' not in gaap[field]['units']:
+        # Check for USD first, then shares as fallback
+        if 'USD' in gaap[field]['units']:
+            result = gaap[field]['units']['USD']
+        elif 'shares' in gaap[field]['units']:
+            result = gaap[field]['units']['shares']
+        else:
             available_units = list(gaap[field]['units'].keys())
             raise KeyError(
-                f"USD units not available for field '{field}' in CIK {self.cik}. "
+                f"Neither USD nor shares units available for field '{field}' in CIK {self.cik}. "
                 f"Available units: {available_units}"
             )
 
-        usd_result = gaap[field]['units']['USD']
-
-        return usd_result
+        return result
     
     def get_dei(self, field:str) -> List[dict]:
         res = self.req_response
