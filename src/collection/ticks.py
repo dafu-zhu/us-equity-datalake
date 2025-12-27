@@ -410,7 +410,8 @@ class Ticks:
             self.logger.error(f"Request failed for {symbol}: {e}")
             return []
 
-    def parse_ticks(self, ticks: List[dict]) -> List[TickDataPoint]:
+    @staticmethod
+    def parse_ticks(ticks: List[dict]) -> List[TickDataPoint]:
         """
         Parse raw tick data from Alpaca API into TickDataPoint objects.
         Converts timestamps from UTC to Eastern Time (timezone-naive).
