@@ -189,7 +189,7 @@ class UploadApp:
         skipped = 0
 
         data_source = 'yfinance' if year < 2017 else 'Alpaca'
-        self.logger.info(f"Starting daily ticks upload for {total} symbols (year={year}, source={data_source}, sequential processing, overwrite={overwrite})")
+        self.logger.info(f"Starting year {year} daily ticks upload for {total} symbols (year={year}, source={data_source}, sequential processing, overwrite={overwrite})")
 
         for sym in self.alpaca_symbols:
             result = self._process_symbol_daily_ticks(sym, year, overwrite=overwrite)
@@ -506,7 +506,7 @@ class UploadApp:
         # Queue for passing data from parser to upload workers
         data_queue = queue.Queue(maxsize=200)
 
-        self.logger.info(f"Starting minute ticks upload for {total_symbols} symbols × {total_days} days = {total_tasks} tasks")
+        self.logger.info(f"Starting year {year} minute ticks upload for {total_symbols} symbols × {total_days} days = {total_tasks} tasks")
         self.logger.info(f"Bulk fetching {chunk_size} symbols at a time | {num_workers} concurrent processors | sleep_time={sleep_time}s")
 
         # Start consumer threads
@@ -753,7 +753,7 @@ class UploadApp:
         failed = 0
         canceled = 0
 
-        self.logger.info(f"Starting fundamental upload for {total} symbols with {max_workers} workers (overwrite={overwrite})")
+        self.logger.info(f"Starting year {year} fundamental upload for {total} symbols with {max_workers} workers (overwrite={overwrite})")
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
@@ -842,12 +842,12 @@ class UploadApp:
         while year <= end_year:
             self.fundamental(year, max_workers, overwrite)
             self.daily_ticks(year, overwrite)
-            if year >= 2016:
+            if year >= 2017:
                 self.minute_ticks(year, overwrite, max_workers, chunk_size, sleep_time)
 
             year += 1
 
 if __name__ == "__main__":
     app = UploadApp()
-    # app.run(start_year=2010, end_year=2025)
-    app.daily_ticks(year=2010, overwrite=True)
+    app.run(start_year=2010, end_year=2025)
+    # app.daily_ticks(year=2010, overwrite=True)

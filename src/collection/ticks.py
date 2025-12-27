@@ -10,6 +10,7 @@ from dataclasses import asdict
 from dotenv import load_dotenv
 import polars as pl
 from pathlib import Path
+import yfinance as yf
 
 from collection.models import TickField, TickDataPoint
 from utils.logger import LoggerFactory
@@ -109,215 +110,155 @@ class Ticks:
     # ==========================================
     # 1. BULK METHODS (For Universe Selection)
     # ==========================================
-    def fetch_and_store_bulk(self, symbols: List[str]) -> bool:
+    def fetch_and_store_bulk(self, symbols: List[str], end_day: str) -> bool:
         """
-        Fetches the last 3 months of daily data for a list of symbols 
+        Fetches the last 3 months of daily data for a list of symbols using yfinance batch download
         and saves them to the 'recent' folder.
 
-        If success (for at least one chunk), return True; otherwise return False
+        If success (for at least one symbol), return True; otherwise return False
+
+        :param symbols: List of symbols to fetch in bulk
+        :param end_day: Endpoint of the 3 month period
         """
-        def _process_ticks(bars: dict) -> bool:
+        def _process_batch(batch_symbols: List[str], start_date: str, end_date: str, save_dir: Path) -> int:
             """
-            Core processing logic for requested data
-            
-            :param bars: Bars in format 
-                Dict[symbol: List[Dict['c': float, 'h': float, 'l': ...]]]
-            :type bars: dict
+            Fetch and process data for a batch of symbols using yfinance batch download
+
+            :param batch_symbols: List of symbols to fetch
+            :param start_date: Start date (format: "YYYY-MM-DD")
+            :param end_date: End date (format: "YYYY-MM-DD")
+            :param save_dir: Directory to save parquet files
+            :return: Number of successfully processed symbols
             """
-            has_data = False
-            # Process each symbol in the chunk
-            for sym, raw_bars in bars.items():
-                if not raw_bars:
-                    continue
-                
-                try:
-                    # Parse and Format for Liquidity Calculation
-                    parsed_bars = self.parse_ticks(raw_bars)
-                    bars_data = [asdict(dp) for dp in parsed_bars]
+            success_count = 0
 
-                    # Create DataFrame
-                    df = (
-                        pl.LazyFrame(bars_data)
-                        .with_columns([
-                            pl.col("timestamp").str.to_date(format='%Y-%m-%dT%H:%M:%S').alias("Date"),
-                            pl.col("close").cast(pl.Float64),
-                            pl.col("volume").cast(pl.Int64),
-                            pl.lit(sym).alias("symbol")
-                        ])
-                        .select(["Date", "symbol", "close", "volume"])
-                    ).collect()
+            try:
+                # Batch download from yfinance
+                data = yf.download(
+                    tickers=batch_symbols,
+                    start=start_date,
+                    end=end_date,
+                    auto_adjust=True,
+                    progress=False,
+                    show_errors=False,
+                    threads=True
+                )
 
-                    # Save to "Recent"
-                    save_path = self.recent_dir / f"{sym}.parquet"
-                    df.write_parquet(save_path)
-                    has_data = True
-                except Exception as error:
-                    self.logger.error(f"Failed to process {sym}: {error}")
-                    continue
-                
-            return has_data
-            
-        try:
-            # Define 3-month window (UTC) - Same logic as update_liquidity_cache
-            end_dt = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
-            start_dt = end_dt - dt.timedelta(weeks=12)
-            
-            start_str = start_dt.isoformat().replace("+00:00", "Z")
-            end_str = end_dt.isoformat().replace("+00:00", "Z")
+                # Handle empty data
+                if data.empty:
+                    self.logger.warning(f"No data returned for batch of {len(batch_symbols)} symbols")
+                    return 0
 
-            # Chunking Logic (Alpaca URL limit safety)
-            CHUNK_SIZE = 100
-            base_url = "https://data.alpaca.markets/v2/stocks/bars"
+                # Process based on single vs multiple symbols
+                if len(batch_symbols) == 1:
+                    # Single symbol - data is a simple DataFrame
+                    symbol = batch_symbols[0]
+                    if not data.empty:
+                        df = pl.DataFrame({
+                            'Date': data.index.date.tolist(),
+                            'symbol': [symbol] * len(data),
+                            'close': data['Close'].astype(float).tolist(),
+                            'volume': data['Volume'].astype(int).tolist()
+                        }).with_columns([
+                            pl.col('Date').cast(pl.Date),
+                            pl.col('close').cast(pl.Float64),
+                            pl.col('volume').cast(pl.Int64)
+                        ]).select(["Date", "symbol", "close", "volume"])
 
-            success_flag = False
-            failed_chunks = []
-
-            # Alpaca format (BRK.B)
-            symbols = [s.replace('-', '.') for s in symbols]
-
-            for i in range(0, len(symbols), CHUNK_SIZE):
-                chunk = symbols[i:i + CHUNK_SIZE]
-                symbols_str = ",".join(chunk)
-                chunk_num = i // 100 + 1
-
-                params = {
-                    "symbols": symbols_str,
-                    "timeframe": "1Day",
-                    "start": start_str,
-                    "end": end_str,
-                    "limit": 10000,
-                    "adjustment": "all",  # Adjusted prices for daily data
-                    "feed": 'sip',
-                    "sort": "asc"
-                }
-
-                # Retry logic for failed chunks
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        # Fetch Data
-                        response = requests.get(base_url, headers=self.headers, params=params)
-
-                        if response.status_code == 429:
-                            # Rate limited - wait and retry
-                            wait_time = (2 ** attempt) * 2  # 2s, 4s, 8s
-                            self.logger.warning(f"Rate limited on chunk {chunk_num}, waiting {wait_time}s (attempt {attempt+1}/{max_retries})")
-                            time.sleep(wait_time)
-                            continue
-                        elif response.status_code != 200:
-                            self.logger.error(f"Error fetching chunk {chunk_num}: {response.status_code}, {response.text}")
-                            if attempt < max_retries - 1:
-                                time.sleep(2)
-                                continue
-                            else:
-                                failed_chunks.append((chunk_num, chunk))
-                                break
-
-                        data = response.json()
-                        bars = data.get("bars", {})
-                        if not bars:
-                            self.logger.warning(f"No bars returned for chunk {chunk_num}")
-                            break
-
-                        success_flag = _process_ticks(bars=bars)
-
-                        # Handle Pagination if necessary
-                        while "next_page_token" in data and data["next_page_token"]:
-                            params["page_token"] = data["next_page_token"]
-                            response = requests.get(base_url, headers=self.headers, params=params)
-                            data = response.json()
-                            bars = data.get("bars", {})
-                            if not bars:
-                                break
-                            success_flag = _process_ticks(bars=bars)
-
-                        self.logger.info(f"Chunk {chunk_num} successful!")
-                        break  # Success, exit retry loop
-
-                    except Exception as e:
-                        self.logger.error(f"Exception fetching chunk {chunk_num}: {e}")
-                        if attempt < max_retries - 1:
-                            time.sleep(2)
-                            continue
-                        else:
-                            failed_chunks.append((chunk_num, chunk))
-                            break
-
-                # Rate limiting between chunks
-                time.sleep(0.5)
-
-            # Retry failed chunks symbol-by-symbol
-            if failed_chunks:
-                self.logger.warning(f"Retrying {len(failed_chunks)} failed chunks symbol-by-symbol...")
-                final_failed_symbols = []
-
-                for chunk_num, chunk in failed_chunks:
-                    self.logger.info(f"Processing failed chunk {chunk_num} ({len(chunk)} symbols) individually...")
-
-                    for symbol in chunk:
-                        # Try fetching individual symbol
-                        individual_params = {
-                            "symbols": symbol,
-                            "timeframe": "1Day",
-                            "start": start_str,
-                            "end": end_str,
-                            "limit": 10000,
-                            "adjustment": "all",  # Adjusted prices for daily data
-                            "feed": 'sip',
-                            "sort": "asc"
-                        }
-
-                        max_individual_retries = 2
-                        individual_success = False
-
-                        for retry in range(max_individual_retries):
-                            try:
-                                response = requests.get(base_url, headers=self.headers, params=individual_params)
-
-                                if response.status_code == 429:
-                                    wait_time = (retry + 1) * 2
-                                    time.sleep(wait_time)
-                                    continue
-                                elif response.status_code != 200:
-                                    if retry < max_individual_retries - 1:
-                                        time.sleep(1)
-                                        continue
-                                    break
-
-                                data = response.json()
-                                bars = data.get("bars", {})
-
-                                if bars and symbol in bars:
-                                    _process_ticks(bars=bars)
-                                    individual_success = True
-                                    self.logger.info(f"  ✓ {symbol}")
-                                    break
-                                else:
-                                    # No data for this symbol (possibly delisted/invalid)
-                                    self.logger.warning(f"  ✗ {symbol} - no data available")
-                                    break
-
-                            except Exception as e:
-                                self.logger.error(f"  ✗ {symbol} - exception: {e}")
-                                if retry < max_individual_retries - 1:
-                                    time.sleep(1)
-                                    continue
-                                break
-
-                        if not individual_success:
-                            final_failed_symbols.append(symbol)
-
-                        # Rate limit between individual requests
-                        time.sleep(0.3)
-
-                # Log final summary
-                if final_failed_symbols:
-                    self.logger.error(f"Failed to fetch {len(final_failed_symbols)} symbols after individual retries:")
-                    self.logger.error(f"  Failed symbols: {', '.join(final_failed_symbols[:50])}{'...' if len(final_failed_symbols) > 50 else ''}")
+                        save_path = save_dir / f"{symbol}.parquet"
+                        df.write_parquet(save_path)
+                        success_count += 1
                 else:
-                    self.logger.info(f"All symbols from failed chunks successfully fetched individually!")
+                    # Multiple symbols - data is multi-index DataFrame
+                    # Extract Close and Volume for each symbol
+                    for symbol in batch_symbols:
+                        try:
+                            # Check if symbol has data
+                            if symbol not in data['Close'].columns:
+                                self.logger.warning(f"No data for {symbol}")
+                                continue
 
-            return success_flag
+                            # Extract symbol's data
+                            symbol_close = data['Close'][symbol]
+                            symbol_volume = data['Volume'][symbol]
+
+                            # Remove NaN rows (missing data)
+                            valid_mask = ~(symbol_close.isna() | symbol_volume.isna())
+
+                            if not valid_mask.any():
+                                self.logger.warning(f"No valid data for {symbol}")
+                                continue
+
+                            # Create DataFrame
+                            df = pl.DataFrame({
+                                'Date': data.index[valid_mask].date.tolist(),
+                                'symbol': [symbol] * valid_mask.sum(),
+                                'close': symbol_close[valid_mask].astype(float).tolist(),
+                                'volume': symbol_volume[valid_mask].astype(int).tolist()
+                            }).with_columns([
+                                pl.col('Date').cast(pl.Date),
+                                pl.col('close').cast(pl.Float64),
+                                pl.col('volume').cast(pl.Int64)
+                            ]).select(["Date", "symbol", "close", "volume"])
+
+                            # Save to dated directory
+                            save_path = save_dir / f"{symbol}.parquet"
+                            df.write_parquet(save_path)
+                            success_count += 1
+
+                        except Exception as e:
+                            self.logger.error(f"Failed to process {symbol}: {e}")
+                            continue
+
+                return success_count
+
+            except Exception as e:
+                self.logger.error(f"Exception processing batch: {e}")
+                return 0
+
+        try:
+            # Define 3-month window
+            end_dt = dt.datetime.strptime(end_day, '%Y-%m-%d')
+            start_dt = end_dt - dt.timedelta(weeks=12)
+
+            start_date = start_dt.strftime('%Y-%m-%d')
+            end_date = end_dt.strftime('%Y-%m-%d')
+
+            # Extract year and month from end_day for directory structure
+            year = end_dt.strftime('%Y')
+            month = end_dt.strftime('%m')
+
+            # Create dated directory path
+            recent_dated_dir = self.recent_dir / year / month
+            recent_dated_dir.mkdir(parents=True, exist_ok=True)
+
+            total_success = 0
+            BATCH_SIZE = 100  # yfinance handles 100 symbols well
+
+            self.logger.info(f"Starting bulk fetch for {len(symbols)} symbols from {start_date} to {end_date}")
+            self.logger.info(f"Storing to: {recent_dated_dir}")
+
+            # Process in batches
+            for i in range(0, len(symbols), BATCH_SIZE):
+                batch = symbols[i:i + BATCH_SIZE]
+                batch_num = i // BATCH_SIZE + 1
+                total_batches = (len(symbols) + BATCH_SIZE - 1) // BATCH_SIZE
+
+                self.logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} symbols)")
+
+                batch_success = _process_batch(batch, start_date, end_date, recent_dated_dir)
+                total_success += batch_success
+
+                self.logger.info(f"Batch {batch_num} completed: {batch_success}/{len(batch)} successful")
+
+                # Small delay between batches to be respectful to yfinance
+                if i + BATCH_SIZE < len(symbols):
+                    time.sleep(1)
+
+            # Log final summary
+            self.logger.info(f"Bulk fetch completed: {total_success}/{len(symbols)} symbols successful")
+
+            return total_success > 0
 
         except Exception as e:
             self.logger.error(f"Error during bulk fetch: {e}")

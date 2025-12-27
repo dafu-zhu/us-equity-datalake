@@ -2,7 +2,7 @@
 SEC EDGAR Stock Fetcher
 ===============================
 
-Fetches all actively traded US common stocks from SEC EDGAR API.
+Fetches all actively traded US common stocks from Nasdaq Trader
 """
 import io
 import os
@@ -11,14 +11,17 @@ import requests
 import pandas as pd
 from datetime import datetime
 from ftplib import FTP
+from pathlib import Path
+import logging
+
+from utils.logger import setup_logger
 
 
 def is_common_stock(name: str) -> bool:
     """
     Determines if a security is a common stock based on its name.
 
-    Returns:
-        True if the security is a common stock, False otherwise.
+    :return: True if the security is a common stock, False otherwise.
     """
     if pd.isna(name) or not isinstance(name, str):
         return False
@@ -85,16 +88,20 @@ def is_common_stock(name: str) -> bool:
     return True
 
 
-def fetch_all_stocks(with_filter=True) -> pd.DataFrame:
+def fetch_all_stocks(with_filter=True, logger=None) -> pd.DataFrame:
     """
-    Connects to ftp.nasdaqtrader.com to fetch the raw ticker list.
+    Connects to ftp.nasdaqtrader.com to fetch the current ticker list.
     """
     ftp_host = "ftp.nasdaqtrader.com"
     ftp_dir = "SymbolDirectory"
     ftp_file = "nasdaqtraded.txt"
 
+    if not logger:
+        log_dir = Path("data/logs/symbols")
+        logger = setup_logger("symbols", log_dir, logging.INFO, console_output=True)
+
     try:
-        print(f"Connecting to FTP: {ftp_host}...")
+        logger.info(f"Connecting to FTP: {ftp_host}...")
         
         # Establish FTP Connection
         ftp = FTP(ftp_host)
@@ -102,7 +109,7 @@ def fetch_all_stocks(with_filter=True) -> pd.DataFrame:
         ftp.cwd(ftp_dir)
         
         # Download file to memory (BytesIO)
-        print(f"Downloading {ftp_file}...")
+        logger.info(f"Downloading the latest {ftp_file}...")
         byte_buffer = io.BytesIO()
         
         # Retrieve a file
@@ -132,15 +139,16 @@ def fetch_all_stocks(with_filter=True) -> pd.DataFrame:
             df = df.rename(columns={'Symbol': 'Ticker', 'Security Name': 'Name'})
 
             # FILTER: Exclude non common stocks
-            print(f"Before common stock filter: {len(df)} securities")
+            logger.info(f"Before common stock filter: {len(df)} securities")
             df = df[df['Name'].apply(is_common_stock)]
-            print(f"After common stock filter: {len(df)} securities")
+            df = df[~df['Symbol'].str.contains('$', regex=False)]
+            logger.info(f"After common stock filter: {len(df)} securities")
 
         # Remove duplicates
         df = df.drop_duplicates(subset=['Ticker'], keep='first')
         df = df.sort_values('Ticker').reset_index(drop=True)
         
-        print(f"Final Universe: {len(df)} common stocks")
+        logger.info(f"Final Universe: {len(df)} common stocks")
         
         # Store result
         dir_path = os.path.join('data', 'symbols')
@@ -154,7 +162,7 @@ def fetch_all_stocks(with_filter=True) -> pd.DataFrame:
         return output_df
 
     except Exception as error:
-        print(f"Error fetching Nasdaq data: {error}")
+        logger.error(f"Error fetching Nasdaq data: {error}")
         return None
     
 
