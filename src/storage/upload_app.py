@@ -110,7 +110,6 @@ class UploadApp:
     def _process_symbol_daily_ticks(self, sym: str, year: int, overwrite: bool = False) -> dict:
         """
         Process daily ticks for a single symbol.
-        Uses yfinance for years < 2017, Alpaca for years >= 2017.
         Returns dict with status for progress tracking.
 
         :param sym: Symbol in Alpaca format (e.g., 'BRK.B')
@@ -125,9 +124,8 @@ class UploadApp:
         try:
             # Initialize Ticks instance with appropriate symbol format
             if year < 2017:
-                # Use yfinance for years before 2017 (use SEC format with '-')
-                ticks = Ticks(sec_symbol)
-                daily_df = ticks.collect_daily_ticks_yf(year=year)
+                # TODO: Get from CRSP to avoid survivorship bias
+                pass
             else:
                 # Use Alpaca for years >= 2017 (use Alpaca format with '.')
                 ticks = Ticks(sym)
@@ -153,7 +151,7 @@ class UploadApp:
                 'symbol': sec_symbol,
                 'year': str(year),
                 'data_type': 'ticks',
-                'source': 'yfinance' if year < 2017 else 'alpaca'
+                'source': 'crsp' if year < 2017 else 'alpaca'
             }
             # Allow list or dict as metadata value
             s3_metadata_prepared = {
@@ -176,7 +174,7 @@ class UploadApp:
     def daily_ticks(self, year: int, overwrite: bool = False):
         """
         Upload daily ticks for all symbols sequentially (no concurrency to avoid rate limits).
-        Uses yfinance for years < 2017, Alpaca for years >= 2017.
+        Uses crsp for years < 2017, Alpaca for years >= 2017.
 
         :param year: Year to fetch data for
         :param overwrite: If True, overwrite existing data in S3 (default: False)
@@ -188,7 +186,7 @@ class UploadApp:
         canceled = 0
         skipped = 0
 
-        data_source = 'yfinance' if year < 2017 else 'Alpaca'
+        data_source = 'crsp' if year < 2017 else 'Alpaca'
         self.logger.info(f"Starting year {year} daily ticks upload for {total} symbols (year={year}, source={data_source}, sequential processing, overwrite={overwrite})")
 
         for sym in self.alpaca_symbols:

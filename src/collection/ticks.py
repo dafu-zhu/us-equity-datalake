@@ -10,19 +10,11 @@ from dataclasses import asdict
 from dotenv import load_dotenv
 import polars as pl
 from pathlib import Path
-import yfinance as yf
 
 from collection.models import TickField, TickDataPoint
 from utils.logger import LoggerFactory
 
 load_dotenv()
-
-# Suppress yfinance warnings and error messages
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", message=".*yfinance.*")
-
-# Suppress yfinance logger output (errors printed to stderr)
-logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 # Shared logger
 _logger_factory = LoggerFactory(
@@ -110,9 +102,9 @@ class Ticks:
     # ==========================================
     # 1. BULK METHODS (For Universe Selection)
     # ==========================================
-    def fetch_and_store_bulk(self, symbols: List[str], end_day: str) -> bool:
+    def recent_daily_ticks(self, symbols: List[str], end_day: str, batch_size: int=100) -> bool:
         """
-        Fetches the last 3 months of daily data for a list of symbols using yfinance batch download
+        Fetches the last 3 months of daily data for a list of symbols 
         and saves them to the 'recent' folder.
 
         If success (for at least one symbol), return True; otherwise return False
@@ -122,7 +114,7 @@ class Ticks:
         """
         def _process_batch(batch_symbols: List[str], start_date: str, end_date: str, save_dir: Path) -> int:
             """
-            Fetch and process data for a batch of symbols using yfinance batch download
+            Fetch and process data for a batch of symbols 
 
             :param batch_symbols: List of symbols to fetch
             :param start_date: Start date (format: "YYYY-MM-DD")
@@ -133,82 +125,16 @@ class Ticks:
             success_count = 0
 
             try:
-                # Batch download from yfinance
-                data = yf.download(
-                    tickers=batch_symbols,
-                    start=start_date,
-                    end=end_date,
-                    auto_adjust=True,
-                    progress=False,
-                    show_errors=False,
-                    threads=True
-                )
+                # TODO: Get daily data from start_date to end_date
+                data = None
 
                 # Handle empty data
                 if data.empty:
                     self.logger.warning(f"No data returned for batch of {len(batch_symbols)} symbols")
                     return 0
 
-                # Process based on single vs multiple symbols
-                if len(batch_symbols) == 1:
-                    # Single symbol - data is a simple DataFrame
-                    symbol = batch_symbols[0]
-                    if not data.empty:
-                        df = pl.DataFrame({
-                            'Date': data.index.date.tolist(),
-                            'symbol': [symbol] * len(data),
-                            'close': data['Close'].astype(float).tolist(),
-                            'volume': data['Volume'].astype(int).tolist()
-                        }).with_columns([
-                            pl.col('Date').cast(pl.Date),
-                            pl.col('close').cast(pl.Float64),
-                            pl.col('volume').cast(pl.Int64)
-                        ]).select(["Date", "symbol", "close", "volume"])
-
-                        save_path = save_dir / f"{symbol}.parquet"
-                        df.write_parquet(save_path)
-                        success_count += 1
-                else:
-                    # Multiple symbols - data is multi-index DataFrame
-                    # Extract Close and Volume for each symbol
-                    for symbol in batch_symbols:
-                        try:
-                            # Check if symbol has data
-                            if symbol not in data['Close'].columns:
-                                self.logger.warning(f"No data for {symbol}")
-                                continue
-
-                            # Extract symbol's data
-                            symbol_close = data['Close'][symbol]
-                            symbol_volume = data['Volume'][symbol]
-
-                            # Remove NaN rows (missing data)
-                            valid_mask = ~(symbol_close.isna() | symbol_volume.isna())
-
-                            if not valid_mask.any():
-                                self.logger.warning(f"No valid data for {symbol}")
-                                continue
-
-                            # Create DataFrame
-                            df = pl.DataFrame({
-                                'Date': data.index[valid_mask].date.tolist(),
-                                'symbol': [symbol] * valid_mask.sum(),
-                                'close': symbol_close[valid_mask].astype(float).tolist(),
-                                'volume': symbol_volume[valid_mask].astype(int).tolist()
-                            }).with_columns([
-                                pl.col('Date').cast(pl.Date),
-                                pl.col('close').cast(pl.Float64),
-                                pl.col('volume').cast(pl.Int64)
-                            ]).select(["Date", "symbol", "close", "volume"])
-
-                            # Save to dated directory
-                            save_path = save_dir / f"{symbol}.parquet"
-                            df.write_parquet(save_path)
-                            success_count += 1
-
-                        except Exception as e:
-                            self.logger.error(f"Failed to process {symbol}: {e}")
-                            continue
+                # TODO: Process based on single vs multiple symbols
+                
 
                 return success_count
 
@@ -233,16 +159,15 @@ class Ticks:
             recent_dated_dir.mkdir(parents=True, exist_ok=True)
 
             total_success = 0
-            BATCH_SIZE = 100  # yfinance handles 100 symbols well
 
             self.logger.info(f"Starting bulk fetch for {len(symbols)} symbols from {start_date} to {end_date}")
             self.logger.info(f"Storing to: {recent_dated_dir}")
 
             # Process in batches
-            for i in range(0, len(symbols), BATCH_SIZE):
-                batch = symbols[i:i + BATCH_SIZE]
-                batch_num = i // BATCH_SIZE + 1
-                total_batches = (len(symbols) + BATCH_SIZE - 1) // BATCH_SIZE
+            for i in range(0, len(symbols), batch_size):
+                batch = symbols[i:i + batch_size]
+                batch_num = i // batch_size + 1
+                total_batches = (len(symbols) + batch_size - 1) // batch_size
 
                 self.logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} symbols)")
 
@@ -251,8 +176,8 @@ class Ticks:
 
                 self.logger.info(f"Batch {batch_num} completed: {batch_success}/{len(batch)} successful")
 
-                # Small delay between batches to be respectful to yfinance
-                if i + BATCH_SIZE < len(symbols):
+                # Small delay between batches to be respectful
+                if i + batch_size < len(symbols):
                     time.sleep(1)
 
             # Log final summary
@@ -290,7 +215,7 @@ class Ticks:
             response = requests.get(url, headers=self.headers)
 
             # Rate limit: 200/m or 10/s
-            time.sleep(0.3)
+            time.sleep(0.03)
 
             # 1. Check HTTP Status Code
             if response.status_code != 200:
@@ -339,7 +264,7 @@ class Ticks:
 
         try:
             response = requests.get(url, headers=self.headers)
-            time.sleep(0.3)
+            time.sleep(0.03)
 
             if response.status_code != 200:
                 self.logger.error(f"API Error [{response.status_code}] for {symbol}: {response.text}")
@@ -358,73 +283,6 @@ class Ticks:
         except Exception as e:
             self.logger.error(f"Request failed for {symbol}: {e}")
             return []
-
-    def get_daily_yf(self, year: str | int) -> pl.DataFrame:
-        """
-        Get daily OHLCV data for a full year from yfinance.
-        Returns DataFrame with schema matching Alpaca format (with null num_trades and vwap).
-
-        :param year: Year as string or integer (e.g., "2024" or 2024)
-        :return: Polars DataFrame with daily ticks (Date, OHLCV, null num_trades/vwap)
-        """
-        import sys
-        import io
-        import yfinance as yf
-
-        if isinstance(year, str):
-            year = int(year)
-
-        start_date = f"{year}-01-01"
-        end_date = f"{year}-12-31"
-
-        try:
-            # Fetch data from yfinance with stderr suppressed
-            self.logger.info(f"Fetching daily data from yfinance for {self.symbol} (year {year})")
-
-            # Redirect stderr to suppress yfinance error messages
-            old_stderr = sys.stderr
-            sys.stderr = io.StringIO()
-
-            try:
-                ticker = yf.Ticker(self.symbol)
-                hist = ticker.history(start=start_date, end=end_date, auto_adjust=True)
-            finally:
-                sys.stderr = old_stderr
-
-            if hist.empty:
-                self.logger.warning(f"No data returned from yfinance for {self.symbol}")
-                return pl.DataFrame()
-
-            # Reset index to get Date as a column
-            hist = hist.reset_index()
-
-            # Create Polars DataFrame with schema matching Alpaca format
-            df = pl.DataFrame({
-                'Date': hist['Date'].dt.date.tolist(),
-                'open': hist['Open'].astype(float).tolist(),
-                'high': hist['High'].astype(float).tolist(),
-                'low': hist['Low'].astype(float).tolist(),
-                'close': hist['Close'].astype(float).tolist(),
-                'volume': hist['Volume'].astype(int).tolist(),
-                'num_trades': [None] * len(hist),  # yfinance doesn't provide this
-                'vwap': [None] * len(hist)  # yfinance doesn't provide this
-            }).with_columns([
-                pl.col('Date').cast(pl.Date),
-                pl.col('open').cast(pl.Float64),
-                pl.col('high').cast(pl.Float64),
-                pl.col('low').cast(pl.Float64),
-                pl.col('close').cast(pl.Float64),
-                pl.col('volume').cast(pl.Int64),
-                pl.col('num_trades').cast(pl.Int64),
-                pl.col('vwap').cast(pl.Float64)
-            ])
-
-            self.logger.info(f"Successfully fetched {len(df)} trading days from yfinance for {self.symbol}")
-            return df
-
-        except Exception as e:
-            self.logger.error(f"Failed to fetch data from yfinance for {self.symbol}: {e}")
-            return pl.DataFrame()
 
     @staticmethod
     def parse_ticks(ticks: List[dict]) -> List[TickDataPoint]:
@@ -498,51 +356,11 @@ class Ticks:
                 pl.col('high').cast(pl.Float64),
                 pl.col('low').cast(pl.Float64),
                 pl.col('close').cast(pl.Float64),
-                pl.col('volume').cast(pl.Int64),
-                pl.col('num_trades').cast(pl.Int64),
-                pl.col('vwap').cast(pl.Float64)
+                pl.col('volume').cast(pl.Int64)
             ])
-            .drop("timestamp")
+            .drop(["timestamp", "num_trades", "vwap"])
             .lazy()
         )
-        calendar_lf = calendar_lf.join_asof(ticks_lf, on='Date')
-
-        result = calendar_lf.collect()
-        self.daily_ticks_df = result
-
-        return result
-
-    def collect_daily_ticks_yf(self, year: int) -> pl.DataFrame:
-        """
-        Given a year, collect daily ticks from yfinance and merge with master calendar.
-
-        :param year: Specify trade year
-        :type year: int
-        """
-        # Fetch data from yfinance (returns DataFrame directly)
-        ticks_df = self.get_daily_yf(year=year)
-
-        # Handle empty data case
-        if len(ticks_df) == 0:
-            self.logger.warning(f"No data available from yfinance for {self.symbol} in year {year}")
-            self.daily_ticks_df = pl.DataFrame()
-            return pl.DataFrame()
-
-        # Define date range
-        start_date = dt.date(year, 1, 1)
-        end_date = dt.date(year, 12, 31)
-
-        # Merge with master calendar
-        calendar_path = self.calendar_dir / "master.parquet"
-        calendar_lf = (
-            pl.scan_parquet(calendar_path)
-            .filter(pl.col('Date').is_between(start_date, end_date))
-            .sort('Date')
-            .lazy()
-        )
-
-        # Join with calendar (yfinance data already has correct schema)
-        ticks_lf = ticks_df.lazy()
         calendar_lf = calendar_lf.join_asof(ticks_lf, on='Date')
 
         result = calendar_lf.collect()
