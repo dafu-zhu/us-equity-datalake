@@ -30,5 +30,6 @@ def get_hist_universe(year: int, month: int):
 
     return q.collect()
 
-df = get_hist_universe(year, month)
-print(df['Ticker'].to_list())
+if __name__ == "__main__":
+    df = get_hist_universe(year, month)
+    print(df['Ticker'].to_list())

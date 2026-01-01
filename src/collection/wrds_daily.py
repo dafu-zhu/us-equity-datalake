@@ -35,9 +35,12 @@ class WRDSDailyTicks:
 
         self.security_master = SecurityMaster(db=self.conn)
 
-    def get_daily(self, symbol: str, day: str, adjusted: bool=True):
+    def get_daily(self, symbol: str, day: str, adjusted: bool=True, auto_resolve: bool=True) -> dict:
         """
-        Smart auto-resolve: Handle ticker name changes
+        Find daily ticks for one symbol on a given day
+
+        :param adjusted: Adjustment only applies on stock split
+        :param auto_resolve: Enable auto_resolve to find nearest available security_id if symbol not found in the given day; Otherwise throw an ValueError
 
         Example: get_daily('META', '2021-12-31')
         - 'META' not active on 2021-12-31 (exact match fails)
@@ -45,65 +48,7 @@ class WRDSDailyTicks:
         - Check if security_id=1234 was active on 2021-12-31 (as 'FB') → YES
         - Fetch data using permno for that security
         """
-        # Try exact match
         sid = self.security_master.get_security_id(symbol, day)
-
-        if not sid:
-            master_tb = self.security_master.master_table()
-            date_check = dt.datetime.strptime(day, '%Y-%m-%d').date()
-
-            # Find all securities that ever used this symbol
-            candidates = master_tb.filter(
-                pl.col('symbol').eq(symbol)
-            ).select('security_id').unique()
-
-            if candidates.is_empty():
-                raise ValueError(f"Symbol '{symbol}' never existed in security master")
-
-            # For each candidate, check if it was active on target date (under ANY symbol)
-            active_securities = []
-            for candidate_sid in candidates['security_id']:
-                was_active = master_tb.filter(
-                    pl.col('security_id').eq(candidate_sid),
-                    pl.col('start_date').le(date_check),
-                    pl.col('end_date').ge(date_check)
-                )
-                if not was_active.is_empty():
-                    # Find when this security used the queried symbol
-                    symbol_usage = master_tb.filter(
-                        pl.col('security_id').eq(candidate_sid),
-                        pl.col('symbol').eq(symbol)
-                    ).select(['start_date', 'end_date']).head(1)
-
-                    active_securities.append({
-                        'sid': candidate_sid,
-                        'symbol_start': symbol_usage['start_date'][0],
-                        'symbol_end': symbol_usage['end_date'][0]
-                    })
-
-            # Resolve ambiguity
-            if len(active_securities) == 0:
-                raise ValueError(
-                    f"Symbol '{symbol}' exists but the associated security was not active on {day}"
-                )
-            elif len(active_securities) == 1:
-                sid = active_securities[0]['sid']
-            else:
-                # Multiple securities used this symbol and were active on target date
-                # Pick the one that used this symbol closest to the query date
-                def distance_to_date(sec):
-                    """Calculate temporal distance from query date to when symbol was used"""
-                    if date_check < sec['symbol_start']:
-                        return (sec['symbol_start'] - date_check).days
-                    elif date_check > sec['symbol_end']:
-                        return (date_check - sec['symbol_end']).days
-                    else:
-                        return 0
-
-                # Pick security with minimum distance
-                best_match = min(active_securities, key=distance_to_date)
-                sid = best_match['sid']
-
         permno = self.security_master.sid_to_permno(sid)
 
         # Write query to access CRSP database
@@ -166,8 +111,83 @@ class WRDSDailyTicks:
 
         return result
 
-    def get_daily_range(self, symbol: str, start_date: str, end_date: str, adjusted: bool=True):
-        pass
+    def get_daily_range(self, symbol: str, start_date: str, end_date: str, adjusted: bool=True, auto_resolve: bool=True) -> list[dict]:
+        """
+        Fetch daily ticks for a symbol across a date range
+
+        Handles symbol changes automatically (e.g., FB -> META)
+        Returns one dict per trading day with OHLCV data
+
+        :param symbol: Ticker symbol (can be current or historical)
+        :param start_date: Start date in 'YYYY-MM-DD' format
+        :param end_date: End date in 'YYYY-MM-DD' format (inclusive)
+        :param adjusted: If True, apply split/dividend adjustments
+        :param auto_resolve: Enable auto_resolve to find security across symbol changes
+        :return: List of dicts, one per trading day
+
+        Example:
+            get_daily_range('META', '2021-01-01', '2023-01-01')
+            # Returns data for FB (2021-2022) and META (2022-2023)
+        """
+        # Resolve symbol to security_id (use end_date as reference point)
+        sid = self.security_master.get_security_id(symbol, end_date, auto_resolve=auto_resolve)
+        permno = self.security_master.sid_to_permno(sid)
+
+        # Build query for date range
+        if adjusted:
+            query = f"""
+                SELECT
+                    date,
+                    openprc / cfacpr as open,
+                    askhi / cfacpr as high,
+                    bidlo / cfacpr as low,
+                    abs(prc) / cfacpr as close,
+                    vol * cfacshr as volume
+                FROM crsp.dsf
+                WHERE permno = {permno}
+                    AND date >= '{start_date}'
+                    AND date <= '{end_date}'
+                    AND prc IS NOT NULL
+                ORDER BY date ASC
+            """
+        else:
+            query = f"""
+                SELECT
+                    date,
+                    openprc as open,
+                    askhi as high,
+                    bidlo as low,
+                    abs(prc) as close,
+                    vol as volume
+                FROM crsp.dsf
+                WHERE permno = {permno}
+                    AND date >= '{start_date}'
+                    AND date <= '{end_date}'
+                    AND prc IS NOT NULL
+                ORDER BY date ASC
+            """
+
+        # Execute query
+        df_pandas = self.conn.raw_sql(query, date_cols=['date'])
+
+        # Handle empty data case
+        if df_pandas.empty:
+            return []
+
+        # Convert each row to dict
+        result = []
+        for _, row in df_pandas.iterrows():
+            day_data = {
+                'timestamp': pd.to_datetime(row['date']).strftime('%Y-%m-%d'),
+                'open': float(row['open']),
+                'high': float(row['high']),
+                'low': float(row['low']),
+                'close': float(row['close']),
+                'volume': int(row['volume'])
+            }
+            result.append(day_data)
+
+        return result
 
     def close(self):
         """Close WRDS connection"""

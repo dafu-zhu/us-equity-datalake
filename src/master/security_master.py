@@ -6,24 +6,30 @@ import os
 import time
 import requests
 import datetime as dt
+from typing import List, Tuple
 
 load_dotenv()
 
 class SecurityMaster:
-    def __init__(self):
-        username = os.getenv('WRDS_USERNAME')
-        password = os.getenv('WRDS_PASSWORD')
-        self.db = wrds.Connection(
-            wrds_username=username,
-            wrds_password=password
-        )
+    def __init__(self, db: wrds.Connection=None):
+        if db is None:
+            username = os.getenv('WRDS_USERNAME')
+            password = os.getenv('WRDS_PASSWORD')
+            self.db = wrds.Connection(
+                wrds_username=username,
+                wrds_password=password
+            )
+        else:
+            self.db = db
 
-        self.cik_cusip = None
-        self.lookup = None
+        self.cik_cusip = self.cik_cusip_mapping()
+        self.master_tb = self.master_table()
     
-    def cik_cusip_mapping(self):
+    def cik_cusip_mapping(self) -> pl.DataFrame:
         """
         All historical mappings, updated until Dec 31, 2024
+
+        Schema: (permno, symbol, company, cik, cusip, start_date, end_date)
         """
         query = """
         SELECT DISTINCT
@@ -81,61 +87,169 @@ class SecurityMaster:
 
         return pl_map
     
-    def security_map(self):
+    def security_map(self) -> pl.DataFrame:
         """
         Maps security_id with unique permno, replacing permno
+
+        Schema: (security_id, permno)
         """
-        if self.cik_cusip is None:
-            self.cik_cusip = self.cik_cusip_mapping()
         unique_permnos = self.cik_cusip.select('permno').unique(maintain_order=True)
         result = pl.DataFrame({
             'security_id': range(1000, 1000 + len(unique_permnos)),
             'permno': unique_permnos
         })
+
         return result
     
-    def master_table(self):
+    def master_table(self) -> pl.DataFrame:
         """
         Create comprehensive table with security_id as master key, includes historically used symbols, cik, cusip
-        """
-        if self.cik_cusip is None:
-            self.cik_cusip = self.cik_cusip_mapping()
 
+        Schema: (security_id, symbol, company, cik, cusip, start_date, end_date)
+        """
         security_map = self.security_map()
         
         full_history = self.cik_cusip.join(security_map, on='permno', how='left')
         result = full_history[['security_id', 'symbol', 'company', 'cik', 'cusip', 'start_date', 'end_date']]
 
         return result
-
-    def get_security_id(self, symbol: str, day: str) -> int:
+    
+    def auto_resolve(self, symbol: str, day: str) -> int:
         """
-        Finds the Internal ID for a specific Symbol at a specific point in time.
+        Smart resolve unmatched symbol and query day.
+        Route to the security that is active on 'day', and have most recently used / use 'symbol' in the future
         """
         date_check = dt.datetime.strptime(day, '%Y-%m-%d').date()
-        
-        if self.lookup is None:
-            self.lookup = self.master_table()
+
+        # Find all securities that ever used this symbol
+        candidates = self.master_tb.filter(
+            pl.col('symbol').eq(symbol)
+        ).select('security_id').unique()
+
+        if candidates.is_empty():
+            raise ValueError(f"Symbol '{symbol}' never existed in security master")
+
+        # For each candidate, check if it was active on target date (under ANY symbol)
+        active_securities = []
+        for candidate_sid in candidates['security_id']:
+            was_active = self.master_tb.filter(
+                pl.col('security_id').eq(candidate_sid),
+                pl.col('start_date').le(date_check),
+                pl.col('end_date').ge(date_check)
+            )
+            if not was_active.is_empty():
+                # Find when this security used the queried symbol
+                symbol_usage = self.master_tb.filter(
+                    pl.col('security_id').eq(candidate_sid),
+                    pl.col('symbol').eq(symbol)
+                ).select(['start_date', 'end_date']).head(1)
+
+                active_securities.append({
+                    'sid': candidate_sid,
+                    'symbol_start': symbol_usage['start_date'][0],
+                    'symbol_end': symbol_usage['end_date'][0]
+                })
+
+        # Resolve ambiguity
+        if len(active_securities) == 0:
+            raise ValueError(
+                f"Symbol '{symbol}' exists but the associated security was not active on {day}"
+            )
+        elif len(active_securities) == 1:
+            sid = active_securities[0]['sid']
+        else:
+            # Multiple securities used this symbol and were active on target date
+            # Pick the one that used this symbol closest to the query date
+            def distance_to_date(sec):
+                """Calculate temporal distance from query date to when symbol was used"""
+                if date_check < sec['symbol_start']:
+                    return (sec['symbol_start'] - date_check).days
+                elif date_check > sec['symbol_end']:
+                    return (date_check - sec['symbol_end']).days
+                else:
+                    return 0
+
+            # Pick security with minimum distance
+            best_match = min(active_securities, key=distance_to_date)
+            sid = best_match['sid']
             
-        match = self.lookup.filter(
+        return sid
+
+    def get_security_id(self, symbol: str, day: str, auto_resolve: bool=True) -> int | None:
+        """
+        Finds the Internal ID for a specific Symbol at a specific point in time.
+
+        :param auto_resolve: If the security has name change, resolve symbol to the nearest security
+        """
+        date_check = dt.datetime.strptime(day, '%Y-%m-%d').date()
+            
+        match = self.master_tb.filter(
             pl.col('symbol').eq(symbol),
             pl.col('start_date').le(date_check),
             pl.col('end_date').ge(date_check)
         )
         
         if match.is_empty():
-            return None
+            if not auto_resolve:
+                raise ValueError(f"Symbol {symbol} not found in day {day}")
+            else:
+                return self.auto_resolve(symbol, day)
         
         result = match.head(1).select('security_id').item()
 
         return result
+    
+    def get_symbol_history(self, sid: int) -> List[Tuple[str]]:
+        """
+        Full list of symbol usage history for a given security_id
+
+        Example: [('META', '2022-06-09', '2024-12-31'), ('FB', '2012-05-18', '2022-06-08')]
+        """
+        mtb = self.master_table()
+        sid_df = mtb.filter(
+            pl.col('security_id').eq(sid)
+        ).group_by('symbol').agg(
+            pl.col('start_date').min(),
+            pl.col('end_date').max()
+        )
+
+        hist = sid_df.select(['symbol', 'start_date', 'end_date']).rows()
+        isoformat_hist = [(sym, start.isoformat(), end.isoformat()) for sym, start, end in hist]
+
+        return isoformat_hist
+    
+    def sid_to_permno(self, sid: int) -> int:
+        security_map = self.security_map()
+        permno = (
+            security_map.filter(
+                pl.col('security_id').eq(sid)
+            )
+            .select('permno')
+            .head(1)
+            .item()
+        )
+        return permno
+    
+    def sid_to_symbol(self, sid: int, day: str):
+        pass
+
+    def sid_to_cik(self, sid: int, day: str):
+        pass
+
+    def sid_to_cusip(self, sid: int, day: str):
+        pass
+
+    def close(self):
+        """Close WRDS connection"""
+        self.db.close()
     
 
 if __name__ == "__main__":
     sm = SecurityMaster()
 
     df = sm.cik_cusip_mapping()
-    df = df.filter(pl.col('permno').eq(83443))
+
+    df = df.filter(pl.col('symbol').eq('RCM'))
     print(df)
 
     # Scenario A: You ask for "AH" in 2012
@@ -151,3 +265,5 @@ if __name__ == "__main__":
     print(f"Who was MSFT in 2024? ID: {sm.get_security_id('MSFT', '2024-01-01')}")
 
     print(f"Who was BRKB in 2022? ID: {sm.get_security_id('BRKB', '2022-01-01')}")
+
+    sm.close()

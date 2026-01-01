@@ -28,11 +28,11 @@ class UniverseManager:
             df = pl.read_csv(csv_path)
             symbols = df["Ticker"].to_list()
         else:
-            pd_df = fetch_all_stocks()
+            pd_df = fetch_all_stocks(logger=self.logger)
             if pd_df is not None and not pd_df.empty:
                 symbols = pd_df['Ticker'].tolist()
             else:
-                raise ValueError("Failed to fetch symbols from SEC.")
+                raise ValueError("Failed to fetch symbols from Nasdaq Trader.")
                 
         self.logger.info(f"Market Universe Size: {len(symbols)} tickers")
         return symbols
@@ -53,7 +53,7 @@ class UniverseManager:
         if self.recent_dir.exists():
             shutil.rmtree(self.recent_dir)
 
-    def fetch_recent_data(self, day: str, symbols: list[str], refresh=False) -> None:
+    def fetch_recent_data(self, day: str, symbols: list[str], batch_size: int=100, refresh=False) -> None:
         """
         Downloads 3-month daily history for ALL symbols using the efficient bulk fetcher.
         """
@@ -61,11 +61,11 @@ class UniverseManager:
             self.remove_recent_data()
 
         self.logger.info(f"Starting bulk fetch for {len(symbols)} symbols...")
-        # Instantiate Ticks with a dummy symbol (symbol arg is ignored for bulk fetch)
+        # Instantiate Ticks with a dummy symbol
         fetcher = Ticks(symbol="UNIVERSE")
         
-        # Call the bulk method 
-        fetcher.fetch_and_store_bulk(symbols, end_day=day)
+        # Call the bulk method
+        fetcher.recent_daily_ticks(symbols, end_day=day, batch_size=batch_size)
         
         self.logger.info("Bulk fetch complete.")
 
@@ -96,7 +96,7 @@ class UniverseManager:
                     # Metric: Average Dollar Volume (Close * Volume)
                     (pl.col("close") * pl.col("volume")).mean().alias("avg_dollar_vol")
                 )
-                .filter(pl.col("avg_dollar_vol").is_not_null()) # Remove empty data
+                .filter(pl.col("avg_dollar_vol") > 1000)
                 .sort("avg_dollar_vol", descending=True)
                 .head(3000)
             )
@@ -116,7 +116,7 @@ class UniverseManager:
             return []
     
     # TODO: Refactor for upload
-    def store_top_3000(self, day: str) -> None:
+    def store_top_3000(self, day: str, clear: bool) -> None:
         """
         Store top 3000 symbols to dated directory.
 
@@ -140,7 +140,12 @@ class UniverseManager:
 
         self.logger.info(f"Saved Top 3000 symbols to {file_path}")
 
-    def run(self, day: str, refresh=False) -> None:
+        if clear:
+            self.remove_recent_data()
+        
+        self.logger.info(f"Recent data directory removed {self.recent_dir}")
+
+    def run(self, day: str, refresh=False, clear=True) -> None:
         """
         Run complete pipeline
         Output universe_top3000.txt at data/symbols/YYYY/MM/
@@ -149,14 +154,20 @@ class UniverseManager:
         :param refresh: Whether to refresh data from source
         """
         start = time.perf_counter()
-        all_symbols = self.get_current_symbols(refresh=refresh)
+        date = dt.datetime.strptime(day, '%Y-%m-%d')
+        year = date.year
+        month = date.month
+        if year < 2025:
+            all_symbols = self.get_hist_symbols(year, month)
+        else:
+            all_symbols = self.get_current_symbols(refresh=refresh)
         self.fetch_recent_data(day, all_symbols, refresh=refresh)
-        self.store_top_3000(day)
+        self.store_top_3000(day, clear=clear)
         time_count = time.perf_counter() - start
         self.logger.info(f"Processing time: {time_count:.2f}s")
 
 if __name__ == "__main__":
     um = UniverseManager()
     # Use today's date as default
-    today = dt.datetime.now().strftime('%Y-%m-%d')
-    um.run(day=today, refresh=True)
+    day = "2011-01-01"
+    um.run(day=day, refresh=True)

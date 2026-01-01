@@ -2,7 +2,7 @@
 SEC EDGAR Stock Fetcher
 ===============================
 
-Fetches all actively traded US common stocks from Nasdaq Trader
+Fetches all CURRENT actively traded US common stocks from Nasdaq Trader
 """
 import io
 import os
@@ -122,6 +122,8 @@ def fetch_all_stocks(with_filter=True, logger=None) -> pd.DataFrame:
         # Read CSV directly from URL (Separator is '|')
         # Funny enough: without specifying dtype, pandas recognize 'NaN' as null, which is in fact 'Nano Labs Ltd'
         df = pd.read_csv(byte_buffer, sep='|', dtype={'Symbol': str}, keep_default_na=False, na_values=[''])
+
+        df = df.rename(columns={'Symbol': 'Ticker', 'Security Name': 'Name'})
         
         # Remove the file footer
         df = df[:-1]
@@ -135,13 +137,10 @@ def fetch_all_stocks(with_filter=True, logger=None) -> pd.DataFrame:
             if 'Test Issue' in df.columns:
                 df = df[df['Test Issue'] == 'N']
 
-            # Rename columns to match your system
-            df = df.rename(columns={'Symbol': 'Ticker', 'Security Name': 'Name'})
-
             # FILTER: Exclude non common stocks
             logger.info(f"Before common stock filter: {len(df)} securities")
             df = df[df['Name'].apply(is_common_stock)]
-            df = df[~df['Symbol'].str.contains('$', regex=False)]
+            df = df[~df['Ticker'].str.contains('$', regex=False)]
             logger.info(f"After common stock filter: {len(df)} securities")
 
         # Remove duplicates
