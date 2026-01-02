@@ -6,12 +6,16 @@ import os
 import time
 import requests
 import datetime as dt
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+from pathlib import Path
+import logging
+
+from utils.logger import setup_logger
 
 load_dotenv()
 
 class SecurityMaster:
-    def __init__(self, db: wrds.Connection=None):
+    def __init__(self, db: Optional[wrds.Connection] = None):
         if db is None:
             username = os.getenv('WRDS_USERNAME')
             password = os.getenv('WRDS_PASSWORD')
@@ -22,6 +26,11 @@ class SecurityMaster:
         else:
             self.db = db
 
+        self.logger = setup_logger(
+            name="security_master",
+            log_dir=Path("data/logs/master"),
+            level=logging.INFO
+        )
         self.cik_cusip = self.cik_cusip_mapping()
         self.master_tb = self.master_table()
     
@@ -119,6 +128,8 @@ class SecurityMaster:
         Smart resolve unmatched symbol and query day.
         Route to the security that is active on 'day', and have most recently used / use 'symbol' in the future
         """
+        self.logger.info(f"auto_resolve triggered for symbol='{symbol}' on date='{day}'")
+
         date_check = dt.datetime.strptime(day, '%Y-%m-%d').date()
 
         # Find all securities that ever used this symbol
@@ -127,6 +138,7 @@ class SecurityMaster:
         ).select('security_id').unique()
 
         if candidates.is_empty():
+            self.logger.warning(f"auto_resolve failed: symbol '{symbol}' never existed in security master")
             raise ValueError(f"Symbol '{symbol}' never existed in security master")
 
         # For each candidate, check if it was active on target date (under ANY symbol)
@@ -152,6 +164,10 @@ class SecurityMaster:
 
         # Resolve ambiguity
         if len(active_securities) == 0:
+            self.logger.warning(
+                    f"auto_resolve failed: symbol '{symbol}' exists but associated security "
+                    f"was not active on {day}"
+                )
             raise ValueError(
                 f"Symbol '{symbol}' exists but the associated security was not active on {day}"
             )
@@ -172,10 +188,15 @@ class SecurityMaster:
             # Pick security with minimum distance
             best_match = min(active_securities, key=distance_to_date)
             sid = best_match['sid']
+
+            self.logger.info(
+                f"auto_resolve: Multiple candidates found, selected security_id={sid} "
+                f"(minimum temporal distance)"
+            )
             
         return sid
 
-    def get_security_id(self, symbol: str, day: str, auto_resolve: bool=True) -> int | None:
+    def get_security_id(self, symbol: str, day: str, auto_resolve: bool=True) -> int:
         """
         Finds the Internal ID for a specific Symbol at a specific point in time.
 
@@ -199,7 +220,7 @@ class SecurityMaster:
 
         return result
     
-    def get_symbol_history(self, sid: int) -> List[Tuple[str]]:
+    def get_symbol_history(self, sid: int) -> List[Tuple[str, str, str]]:
         """
         Full list of symbol usage history for a given security_id
 

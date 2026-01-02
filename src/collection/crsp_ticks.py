@@ -15,8 +15,8 @@ from master.security_master import SecurityMaster
 load_dotenv()
 
 
-class WRDSDailyTicks:
-    def __init__(self, conn: wrds.Connection=None):
+class CRSPDailyTicks:
+    def __init__(self, conn: Optional[wrds.Connection]=None):
         """Initialize WRDS connection and load master calendar"""
         if conn is None:
             username = os.getenv('WRDS_USERNAME')
@@ -48,7 +48,7 @@ class WRDSDailyTicks:
         - Check if security_id=1234 was active on 2021-12-31 (as 'FB') → YES
         - Fetch data using permno for that security
         """
-        sid = self.security_master.get_security_id(symbol, day)
+        sid = self.security_master.get_security_id(symbol, day, auto_resolve=auto_resolve)
         permno = self.security_master.sid_to_permno(sid)
 
         # Write query to access CRSP database
@@ -196,7 +196,7 @@ class WRDSDailyTicks:
 
 if __name__ == "__main__":
     # Example usage
-    wrds_ticks = WRDSDailyTicks()
+    wrds_ticks = CRSPDailyTicks()
 
     # Close connection
     wrds_ticks.close()
