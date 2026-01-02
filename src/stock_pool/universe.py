@@ -162,7 +162,7 @@ def fetch_all_stocks(with_filter=True, logger=None) -> pd.DataFrame:
 
     except Exception as error:
         logger.error(f"Error fetching Nasdaq data: {error}")
-        return None
+        return pd.DataFrame()
     
 
 if __name__ == "__main__":
