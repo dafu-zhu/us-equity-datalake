@@ -1,86 +1,106 @@
+#!/usr/bin/env python3
+"""
+Generate common US-GAAP fields configuration file.
+
+This script analyzes SEC EDGAR fundamental data for a diverse set of companies
+and identifies fields that are available across all industries. The result is saved
+to data/config/common-gaap-fields.txt for use by the fundamental data collection system.
+
+The script:
+1. Fetches company facts from SEC EDGAR API for diverse companies
+2. Filters for fields with USD or shares units (quantitative metrics)
+3. Calculates the intersection of fields available in ALL companies
+4. Saves the common fields to a configuration file
+"""
+
+import sys
+from pathlib import Path
 import requests
 import time
 
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+
 from utils.mapping import symbol_cik_mapping
 
-# --- Configuration ---
-# SEC requires a proper User-Agent (AppName/Email)
-headers = {'User-Agent': 'ResearchApp/your.email@domain.com'}
+# SEC EDGAR API Configuration
+# SEC requires a User-Agent header in the format: "AppName/Email"
+headers = {'User-Agent': 'US-Equity-Datalake/research@example.com'}
 
-# diverse_tickers = ["AAPL", "JPM", "PFE", "XOM", "WMT", "BA"]
+# Diverse set of tickers across industries for comprehensive field analysis
 # AAPL (Tech), JPM (Banking), PFE (Pharma), XOM (Energy), WMT (Retail), BA (Aerospace)
 target_tickers = ["AAPL", "JPM", "PFE", "XOM", "WMT", "BA"]
 
-# --- Step 1: Get the Ticker -> CIK Mapping ---
-print("Fetching Master Ticker-CIK Index...")
-ticker_mapping_url = "https://www.sec.gov/files/company_tickers.json"
-response = requests.get(ticker_mapping_url, headers=headers)
-
-ticker_to_cik = symbol_cik_mapping()
-
-# --- Step 2: Fetch Facts & Calculate Intersection (Common Fields) ---
-all_company_fields = []  # Store each company's field set
-
-print(f"\nProcessing {len(target_tickers)} companies...")
-print("-" * 50)
-print(f"{'Ticker':<8} {'Industry Hint':<15} {'Total Fields'}")
-print("-" * 50)
-
 industry_map = {
-    "AAPL": "Tech", "JPM": "Banking", "PFE": "Pharma",
-    "XOM": "Energy", "WMT": "Retail", "BA": "Aerospace"
+    "AAPL": "Tech",
+    "JPM": "Banking",
+    "PFE": "Pharma",
+    "XOM": "Energy",
+    "WMT": "Retail",
+    "BA": "Aerospace"
 }
 
+# Get Ticker -> CIK Mapping
+print("Fetching Ticker-CIK Mapping...")
+ticker_to_cik = symbol_cik_mapping()
+
+# Fetch Facts & Calculate Intersection
+all_company_fields = []
+
+print(f"\nProcessing {len(target_tickers)} companies...")
+print("-" * 60)
+print(f"{'Ticker':<10} {'Industry':<15} {'Total Fields'}")
+print("-" * 60)
+
 for ticker in target_tickers:
-    # Get CIK from our mapping
     cik = ticker_to_cik.get(ticker)
-    cik_filled = str(cik).zfill(10)
 
     if not cik:
         print(f"Skipping {ticker} (CIK not found)")
         continue
 
-    # Fetch Company Facts
+    cik_filled = str(cik).zfill(10)
     facts_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik_filled}.json"
-    resp = requests.get(facts_url, headers=headers)
 
-    if resp.status_code == 200:
-        facts_data = resp.json()
+    try:
+        resp = requests.get(facts_url, headers=headers, timeout=30)
 
-        # Only include fields that have 'USD' or 'shares' units
-        gaap_data = facts_data.get('facts', {}).get('us-gaap', {})
-        company_fields = set()
+        if resp.status_code == 200:
+            facts_data = resp.json()
 
-        for field_name, field_data in gaap_data.items():
-            units = field_data.get('units', {})
-            # Only include if field has USD or shares units
-            if 'USD' in units or 'shares' in units:
-                company_fields.add(field_name)
+            # Only include fields that have 'USD' or 'shares' units (quantitative metrics)
+            gaap_data = facts_data.get('facts', {}).get('us-gaap', {})
+            company_fields = set()
 
-        count = len(company_fields)
+            for field_name, field_data in gaap_data.items():
+                units = field_data.get('units', {})
+                if 'USD' in units or 'shares' in units:
+                    company_fields.add(field_name)
 
-        # Store this company's field set
-        all_company_fields.append(company_fields)
+            count = len(company_fields)
+            all_company_fields.append(company_fields)
+            print(f"{ticker:<10} {industry_map[ticker]:<15} {count}")
+        else:
+            print(f"{ticker:<10} Error: HTTP {resp.status_code}")
 
-        print(f"{ticker:<8} {industry_map[ticker]:<15} {count}")
-    else:
-        print(f"{ticker:<8} Error {resp.status_code}")
+    except Exception as e:
+        print(f"{ticker:<10} Error: {e}")
 
-    # Respect SEC rate limit (10 req/sec max, but safer to sleep slightly)
+    # Respect SEC rate limit (10 req/sec max)
     time.sleep(0.2)
 
-# --- Step 3: Calculate Common Fields (Intersection) ---
+# Calculate Common Fields (Intersection)
 if all_company_fields:
     common_fields = set.intersection(*all_company_fields)
 else:
     common_fields = set()
+    print("\nError: No company data was successfully fetched")
+    sys.exit(1)
 
-print("-" * 50)
+print("-" * 60)
 print(f"Common US-GAAP Fields (in ALL companies): {len(common_fields)}")
 
-# --- Step 4: Save to File ---
-from pathlib import Path
-
+# Save to Configuration File
 output_dir = Path("data/config")
 output_dir.mkdir(parents=True, exist_ok=True)
 
