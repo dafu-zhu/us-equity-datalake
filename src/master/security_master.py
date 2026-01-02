@@ -11,8 +11,151 @@ from pathlib import Path
 import logging
 
 from utils.logger import setup_logger
+from stock_pool.universe import fetch_all_stocks
 
 load_dotenv()
+
+
+class SymbolNormalizer:
+    """
+    Deterministic symbol normalizer based on current Nasdaq stock list with SecurityMaster validation.
+
+    Strategy:
+    1. Load current stock list from Nasdaq (via fetch_all_stocks)
+    2. For any incoming symbol with date context, verify security_id matches
+    3. Prevents false matches (e.g., delisted ABCD ≠ current ABC.D)
+    4. If verified same security: return Nasdaq format
+    5. If different security or delisted: return original format
+
+    Edge case handling:
+        - ABCD (2021-2023, delisted, security_id=1000)
+        - ABC.D (2025+, active, security_id=2000)
+        - Both normalize to "ABCD" but different security_id
+        - Solution: Keep historical ABCD as-is, don't convert to ABC.D
+
+    Examples:
+        to_nasdaq_format('BRKB', '2024-01-01') -> 'BRK.B' (same security)
+        to_nasdaq_format('ABCD', '2022-01-01') -> 'ABCD' (delisted, different from ABC.D)
+    """
+
+    # CRSP data coverage end date (update as needed)
+    CRSP_LATEST_DATE = '2024-12-31'
+
+    def __init__(self, security_master: Optional['SecurityMaster'] = None):
+        """
+        Initialize with current Nasdaq stock list and optional SecurityMaster.
+
+        :param security_master: SecurityMaster instance for validation (optional)
+        """
+        # Load current stock list (cached in data/symbols/stock_exchange.csv)
+        self.current_stocks_df = fetch_all_stocks(with_filter=True)
+
+        # Create normalized lookup: {crsp_format: nasdaq_format}
+        # e.g., {'BRKB': 'BRK.B', 'AAPL': 'AAPL', 'GOOGL': 'GOOGL'}
+        self.sym_map = {}
+        for ticker in self.current_stocks_df['Ticker']:
+            # Remove separators for lookup key
+            crsp_key = ticker.replace('.', '').replace('-', '').upper()
+            self.sym_map[crsp_key] = ticker
+
+        self.security_master = security_master
+        self.logger = setup_logger(
+            name="master.SecurityNormalizer",
+            log_dir=Path("data/logs/master"),
+            level=logging.INFO
+        )
+
+    def to_nasdaq_format(self, symbol: str, day: Optional[str] = None) -> str:
+        """
+        Normalize symbol to Nasdaq format with security_id validation.
+
+        :param symbol: Ticker symbol in any format (BRKB, BRK.B, BRK-B)
+        :param day: Date context for validation (format: 'YYYY-MM-DD', optional)
+        :return: Nasdaq format if same security, otherwise original
+
+        Examples:
+            to_nasdaq_format('BRKB', '2024-01-01') -> 'BRK.B' (verified same security)
+            to_nasdaq_format('BRKB') -> 'BRK.B' (no validation, assume same)
+            to_nasdaq_format('ABCD', '2022-01-01') -> 'ABCD' (different security, keep original)
+        """
+        if not symbol:
+            return symbol
+
+        # Remove separators
+        crsp_key = symbol.replace('.', '').replace('-', '').upper()
+
+        # Check if exists in current stock list
+        if crsp_key not in self.sym_map:
+            # Not in current list (delisted), return as-is
+            return symbol.upper()
+
+        nasdaq_format = self.sym_map[crsp_key]
+
+        # If no date context or no SecurityMaster, return Nasdaq format (assume same security)
+        if day is None or self.security_master is None:
+            return nasdaq_format
+
+        # Validate using SecurityMaster: check if same security
+        try:
+            # Get security_id for original symbol at given date
+            original_sid = self.security_master.get_security_id(
+                symbol=crsp_key,  # Use CRSP format for lookup
+                day=day,
+                auto_resolve=False  # Strict match only
+            )
+
+            # Get security_id for Nasdaq format at CRSP latest date
+            nasdaq_sid = self.security_master.get_security_id(
+                symbol=crsp_key,  # Use CRSP format for lookup
+                day=self.CRSP_LATEST_DATE,
+                auto_resolve=False
+            )
+
+            # If same security_id, safe to convert to Nasdaq format
+            if original_sid == nasdaq_sid:
+                return nasdaq_format
+            else:
+                # Different securities, keep original format
+                return symbol.upper()
+
+        except ValueError:
+            self.logger.error(f"Symbol not found in SecurityMaster at one of the dates, keep original")
+            return symbol.upper()
+
+    def batch_normalize(
+        self,
+        symbols: List[str],
+        day: Optional[str] = None
+    ) -> List[str]:
+        """
+        Normalize a batch of symbols with optional date validation.
+
+        :param symbols: List of ticker symbols in any format
+        :param day: Date context for validation (format: 'YYYY-MM-DD', optional)
+        :return: List of normalized symbols (Nasdaq format if verified)
+        """
+        return [self.to_nasdaq_format(sym, day) for sym in symbols]
+
+    @staticmethod
+    def to_crsp_format(symbol: str) -> str:
+        """
+        Convert any format to CRSP format (remove separators).
+
+        :param symbol: Ticker in any format (e.g., BRK.B, BRK-B, BRKB)
+        :return: CRSP format (e.g., BRKB)
+        """
+        return symbol.replace('.', '').replace('-', '').upper()
+
+    @staticmethod
+    def to_sec_format(symbol: str) -> str:
+        """
+        Convert Nasdaq format to SEC format (period -> hyphen).
+
+        :param symbol: Ticker in Nasdaq format (e.g., BRK.B)
+        :return: SEC format (e.g., BRK-B)
+        """
+        return symbol.replace('.', '-').upper()
+
 
 class SecurityMaster:
     def __init__(self, db: Optional[wrds.Connection] = None):
@@ -27,7 +170,7 @@ class SecurityMaster:
             self.db = db
 
         self.logger = setup_logger(
-            name="security_master",
+            name="master.SecurityMaster",
             log_dir=Path("data/logs/master"),
             level=logging.INFO
         )
@@ -266,25 +409,89 @@ class SecurityMaster:
     
 
 if __name__ == "__main__":
+    # Example 1: Basic Symbol Normalization (without SecurityMaster validation)
+    print("=" * 70)
+    print("Example 1: Basic Symbol Normalization (No Validation)")
+    print("=" * 70)
+
+    normalizer = SymbolNormalizer()
+
+    # Test cases demonstrating different formats for the same stock
+    test_symbols = [
+        ('BRKB', 'CRSP format'),
+        ('BRK.B', 'Alpaca format'),
+        ('BRK-B', 'SEC format'),
+        ('AAPL', 'Simple ticker'),
+        ('META', 'Simple ticker'),
+        ('GOOGL', 'Simple ticker'),
+        ('RKLB', 'No separator needed')
+    ]
+
+    print("\nNormalizing symbols to Nasdaq format (assumes same security):")
+    print("-" * 70)
+    for symbol, description in test_symbols:
+        normalized = normalizer.to_nasdaq_format(symbol)
+        print(f"{symbol:10} ({description:20}) -> {normalized}")
+
+    # Demonstrate format conversions
+    print("\n" + "=" * 70)
+    print("Format Conversions:")
+    print("-" * 70)
+    nasdaq_symbol = 'BRK.B'
+    print(f"Nasdaq format:  {nasdaq_symbol}")
+    print(f"CRSP format:    {SymbolNormalizer.to_crsp_format(nasdaq_symbol)}")
+    print(f"SEC format:     {SymbolNormalizer.to_sec_format(nasdaq_symbol)}")
+
+    # Example 2: SecurityMaster Integration
+    print("\n" + "=" * 70)
+    print("Example 2: Symbol Normalization with SecurityMaster Validation")
+    print("=" * 70)
+
     sm = SecurityMaster()
+    normalizer_validated = SymbolNormalizer(security_master=sm)
 
-    df = sm.cik_cusip_mapping()
+    print("\nValidating symbol conversions with security_id:")
+    print("-" * 70)
 
-    df = df.filter(pl.col('symbol').eq('RCM'))
-    print(df)
+    # Test with date context
+    test_cases_with_date = [
+        ('BRKB', '2024-01-01', 'Active stock, same security'),
+        ('BRKB', '2020-01-01', 'Active stock, historical date'),
+    ]
+
+    for symbol, date, description in test_cases_with_date:
+        normalized = normalizer_validated.to_nasdaq_format(symbol, date)
+        print(f"{symbol:10} on {date} ({description:25}) -> {normalized}")
+
+    # Example 3: SecurityMaster Symbol Resolution
+    print("\n" + "=" * 70)
+    print("Example 3: SecurityMaster - Symbol Resolution Scenarios")
+    print("=" * 70)
 
     # Scenario A: You ask for "AH" in 2012
-    print(f"Who was AH in 2012? ID: {sm.get_security_id('AH', '2012-06-01')}")
+    print(f"\nWho was AH in 2012? ID: {sm.get_security_id('AH', '2012-06-01')}")
 
     # Scenario B: You ask for "RCM" in 2012 (The Trap)
-    print(f"Who was RCM in 2012? ID: {sm.get_security_id('RCM', '2012-06-01')}")
-    # Output: ID: None (Correct! RCM didn't exist then)
+    print(f"Who was DNA in 2008? ID: {sm.get_security_id('DNA', '2008-06-01')}")
 
     # Scenario C: You ask for "RCM" in 2020
-    print(f"Who was RCM in 2020? ID: {sm.get_security_id('RCM', '2020-01-01')}")
+    print(f"Who was DNA in 2022? ID: {sm.get_security_id('DNA', '2022-01-01')}")
 
-    print(f"Who was MSFT in 2024? ID: {sm.get_security_id('MSFT', '2024-01-01')}")
-
+    print(f"\nWho was MSFT in 2024? ID: {sm.get_security_id('MSFT', '2024-01-01')}")
     print(f"Who was BRKB in 2022? ID: {sm.get_security_id('BRKB', '2022-01-01')}")
 
+    # Example 4: Edge Case - Preventing False Matches
+    print("\n" + "=" * 70)
+    print("Example 4: Edge Case Prevention (ABCD vs ABC.D)")
+    print("=" * 70)
+    print("\nScenario: ABCD delisted in 2023, ABC.D started in 2025")
+    print("Without validation: ABCD (2022) -> ABC.D (WRONG!)")
+    print("With validation:    ABCD (2022) -> ABCD (CORRECT!)")
+    print("\nValidation uses security_id to ensure same company:")
+    print("- Look up security_id for 'ABCD' at historical date")
+    print("- Look up security_id for 'ABCD' at 2024-12-31")
+    print("- If different security_id -> keep original format")
+    print("- If same security_id -> convert to Nasdaq format")
+
     sm.close()
+    print("\n" + "=" * 70)
