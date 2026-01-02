@@ -7,10 +7,12 @@ import pandas as pd
 import polars as pl
 from dotenv import load_dotenv
 import os
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import datetime as dt
 from pathlib import Path
 from master.security_master import SecurityMaster
+from utils.logger import setup_logger
+import logging
 
 load_dotenv()
 
@@ -35,7 +37,14 @@ class CRSPDailyTicks:
 
         self.security_master = SecurityMaster(db=self.conn)
 
-    def get_daily(self, symbol: str, day: str, adjusted: bool=True, auto_resolve: bool=True) -> dict:
+        # Setup logger
+        self.logger = setup_logger(
+            name="collection.crsp_ticks",
+            log_dir="data/logs/ticks",
+            level=logging.INFO
+        )
+
+    def get_daily(self, symbol: str, day: str, adjusted: bool=True, auto_resolve: bool=True) -> Dict[str, Any]:
         """
         Find daily ticks for one symbol on a given day
 
@@ -111,7 +120,14 @@ class CRSPDailyTicks:
 
         return result
 
-    def get_daily_range(self, symbol: str, start_date: str, end_date: str, adjusted: bool=True, auto_resolve: bool=True) -> list[dict]:
+    def get_daily_range(
+            self, 
+            symbol: str, 
+            start_date: str, 
+            end_date: str, 
+            adjusted: bool=True, 
+            auto_resolve: bool=True
+        ) -> List[Dict[str, Any]]:
         """
         Fetch daily ticks for a symbol across a date range
 
@@ -121,7 +137,7 @@ class CRSPDailyTicks:
         :param symbol: Ticker symbol (can be current or historical)
         :param start_date: Start date in 'YYYY-MM-DD' format
         :param end_date: End date in 'YYYY-MM-DD' format (inclusive)
-        :param adjusted: If True, apply split/dividend adjustments
+        :param adjusted: If True, apply split adjustments
         :param auto_resolve: Enable auto_resolve to find security across symbol changes
         :return: List of dicts, one per trading day
 
@@ -189,14 +205,119 @@ class CRSPDailyTicks:
 
         return result
 
+    def recent_daily_ticks(
+        self,
+        symbols: List[str],
+        end_day: str,
+        window: int = 90,
+        adjusted: bool = True,
+        auto_resolve: bool = True
+    ) -> Dict[str, pl.DataFrame]:
+        """
+        Fetches recent daily data for a list of symbols from CRSP.
+
+        :param symbols: List of symbols to fetch
+        :param end_day: End date in format 'YYYY-MM-DD'
+        :param window: Number of calendar days to fetch (default 90)
+        :param adjusted: If True, apply split adjustments
+        :param auto_resolve: Enable auto_resolve to handle symbol changes
+        :return: Dictionary {symbol: DataFrame} with timestamp, close, volume data
+        """
+        # Calculate start date (same logic as Alpaca)
+        end_dt = dt.datetime.strptime(end_day, '%Y-%m-%d')
+        start_dt = end_dt - dt.timedelta(days=int(window))
+        start_day = start_dt.strftime('%Y-%m-%d')
+
+        self.logger.info(f"Fetching {len(symbols)} symbols from {start_day} to {end_day} (window: {window} days)")
+
+        # Collect data for each symbol
+        result_dict = {}
+        failed_symbols = []
+
+        for i, symbol in enumerate(symbols, 1):
+            try:
+                # Fetch data using existing get_daily_range method
+                data = self.get_daily_range(
+                    symbol=symbol,
+                    start_date=start_day,
+                    end_date=end_day,
+                    adjusted=adjusted,
+                    auto_resolve=auto_resolve
+                )
+
+                # Convert to DataFrame if data exists
+                if data:
+                    df = (
+                        pl.DataFrame(data)
+                        .with_columns([
+                            pl.col('timestamp').str.to_datetime(format='%Y-%m-%d'),
+                            pl.col('close').cast(pl.Float64),
+                            pl.col('volume').cast(pl.Int64)
+                        ])
+                        .select(['timestamp', 'close', 'volume'])
+                    )
+                    result_dict[symbol] = df
+                else:
+                    failed_symbols.append(symbol)
+
+                # Progress logging every 100 symbols
+                if i % 100 == 0:
+                    self.logger.info(f"Progress: {i}/{len(symbols)} symbols processed")
+
+            except Exception as e:
+                failed_symbols.append(symbol)
+                self.logger.warning(f"Failed to fetch {symbol}: {e}")
+
+        self.logger.info(f"Successfully fetched {len(result_dict)}/{len(symbols)} symbols")
+        if failed_symbols:
+            self.logger.warning(f"Failed symbols ({len(failed_symbols)}): {', '.join(failed_symbols)}")
+
+        return result_dict
+
     def close(self):
         """Close WRDS connection"""
         self.conn.close()
 
 
 if __name__ == "__main__":
-    # Example usage
+    # Example: Fetch recent daily ticks for multiple symbols
+    print("=" * 70)
+    print("Example: recent_daily_ticks")
+    print("=" * 70)
+
     wrds_ticks = CRSPDailyTicks()
+
+    # Fetch 90 days of data ending on 2013-01-01 for AAPL, META (FB at that time), BRKB
+    symbols = ["AAPL", "META", "BRKB"]
+    end_day = "2013-01-01"
+    window = 90
+
+    print(f"\nFetching data for {symbols} ending on {end_day} (window: {window} days)")
+    print("-" * 70)
+
+    result = wrds_ticks.recent_daily_ticks(
+        symbols=symbols,
+        end_day=end_day,
+        window=window,
+        adjusted=True,
+        auto_resolve=True
+    )
+
+    # Display results
+    print("\n" + "=" * 70)
+    print("Results:")
+    print("=" * 70)
+    for symbol, df in result.items():
+        print(f"\n{symbol}:")
+        print(f"  Total records: {len(df)}")
+        print(f"  Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
+        print(f"\n  First 3 records:")
+        print(df.head(3))
+        print(f"\n  Last 3 records:")
+        print(df.tail(3))
 
     # Close connection
     wrds_ticks.close()
+    print("\n" + "=" * 70)
+    print("Connection closed")
+    print("=" * 70)

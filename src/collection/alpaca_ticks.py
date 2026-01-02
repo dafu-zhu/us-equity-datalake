@@ -16,13 +16,6 @@ from utils.logger import LoggerFactory
 
 load_dotenv()
 
-# Shared logger
-_logger_factory = LoggerFactory(
-    log_dir='data/logs/ticks',
-    level=logging.INFO,
-    daily_rotation=True,
-    console_output=False
-)
 
 class Ticks:
     def __init__(self) -> None:
@@ -91,9 +84,6 @@ class Ticks:
 
         return start_str, end_str
     
-    # ==========================================
-    # 1. BULK METHODS (For Universe Selection)
-    # ==========================================
     def recent_daily_ticks(self, symbols: List[str], end_day: str, window: int=90) -> Dict[str, pl.DataFrame]:
         """
         Fetches recent daily data for a list of symbols using Alpaca's multi-symbol API.
@@ -199,9 +189,6 @@ class Ticks:
         self.logger.info(f"Successfully fetched {len(result_dict)}/{len(symbols)} symbols")
         return result_dict
 
-    # ==========================================
-    # 2. SINGLE SYMBOL METHODS (For Historical Data)
-    # ==========================================
     def get_ticks(
         self,
         symbol: str,
