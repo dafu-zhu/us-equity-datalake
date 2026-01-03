@@ -214,7 +214,7 @@ class CRSPDailyTicks:
         auto_resolve: bool = True
     ) -> Dict[str, pl.DataFrame]:
         """
-        Fetches recent daily data for a list of symbols from CRSP.
+        Fetches recent daily data for a list of symbols from CRSP
 
         :param symbols: List of symbols to fetch
         :param end_day: End date in format 'YYYY-MM-DD'
@@ -223,54 +223,119 @@ class CRSPDailyTicks:
         :param auto_resolve: Enable auto_resolve to handle symbol changes
         :return: Dictionary {symbol: DataFrame} with timestamp, close, volume data
         """
-        # Calculate start date (same logic as Alpaca)
+        # Calculate start date
         end_dt = dt.datetime.strptime(end_day, '%Y-%m-%d')
         start_dt = end_dt - dt.timedelta(days=int(window))
         start_day = start_dt.strftime('%Y-%m-%d')
 
         self.logger.info(f"Fetching {len(symbols)} symbols from {start_day} to {end_day} (window: {window} days)")
 
-        # Collect data for each symbol
-        result_dict = {}
+        # Step 1: Bulk resolve symbols to permnos (single lookup)
+        self.logger.info("Step 1/3: Resolving symbols to permnos...")
+        symbol_to_permno = {}
         failed_symbols = []
 
-        for i, symbol in enumerate(symbols, 1):
+        for symbol in symbols:
             try:
-                # Fetch data using existing get_daily_range method
-                data = self.get_daily_range(
-                    symbol=symbol,
-                    start_date=start_day,
-                    end_date=end_day,
-                    adjusted=adjusted,
-                    auto_resolve=auto_resolve
-                )
-
-                # Convert to DataFrame if data exists
-                if data:
-                    df = (
-                        pl.DataFrame(data)
-                        .with_columns([
-                            pl.col('timestamp').str.to_datetime(format='%Y-%m-%d'),
-                            pl.col('close').cast(pl.Float64),
-                            pl.col('volume').cast(pl.Int64)
-                        ])
-                        .select(['timestamp', 'close', 'volume'])
-                    )
-                    result_dict[symbol] = df
-                else:
-                    failed_symbols.append(symbol)
-
-                # Progress logging every 100 symbols
-                if i % 100 == 0:
-                    self.logger.info(f"Progress: {i}/{len(symbols)} symbols processed")
-
+                crsp_key = symbol.replace('.', '').replace('-', '').upper()
+                sid = self.security_master.get_security_id(crsp_key, end_day, auto_resolve=auto_resolve)
+                permno = self.security_master.sid_to_permno(sid)
+                symbol_to_permno[symbol] = permno
             except Exception as e:
                 failed_symbols.append(symbol)
-                self.logger.warning(f"Failed to fetch {symbol}: {e}")
+                self.logger.warning(f"Failed to resolve {symbol}: {e}")
+
+        if not symbol_to_permno:
+            self.logger.error("No symbols could be resolved to permnos")
+            return {}
+
+        self.logger.info(f"Resolved {len(symbol_to_permno)}/{len(symbols)} symbols to permnos")
+
+        # Step 2: Single bulk SQL query for all permnos
+        self.logger.info("Step 2/3: Executing bulk SQL query...")
+        permnos = list(symbol_to_permno.values())
+        permno_list_str = ','.join(map(str, permnos))
+
+        # Build bulk query
+        if adjusted:
+            query = f"""
+                SELECT
+                    permno,
+                    date,
+                    openprc / cfacpr as open,
+                    askhi / cfacpr as high,
+                    bidlo / cfacpr as low,
+                    abs(prc) / cfacpr as close,
+                    vol * cfacshr as volume
+                FROM crsp.dsf
+                WHERE permno IN ({permno_list_str})
+                    AND date >= '{start_day}'
+                    AND date <= '{end_day}'
+                    AND prc IS NOT NULL
+                    AND cfacpr IS NOT NULL
+                    AND cfacpr != 0
+                    AND cfacshr IS NOT NULL
+                ORDER BY permno, date ASC
+            """
+        else:
+            query = f"""
+                SELECT
+                    permno,
+                    date,
+                    openprc as open,
+                    askhi as high,
+                    bidlo as low,
+                    abs(prc) as close,
+                    vol as volume
+                FROM crsp.dsf
+                WHERE permno IN ({permno_list_str})
+                    AND date >= '{start_day}'
+                    AND date <= '{end_day}'
+                    AND prc IS NOT NULL
+                ORDER BY permno, date ASC
+            """
+
+        # Execute bulk query
+        df_pandas = self.conn.raw_sql(query, date_cols=['date'])
+        self.logger.info(f"Fetched {len(df_pandas)} total rows from CRSP")
+
+        # Step 3: Split results by symbol
+        self.logger.info("Step 3/3: Splitting results by symbol...")
+
+        # Create reverse mapping: permno -> symbol
+        permno_to_symbol = {v: k for k, v in symbol_to_permno.items()}
+
+        # Convert to polars and split by symbol
+        result_dict = {}
+
+        if not df_pandas.empty:
+            # Add symbol column
+            df_pandas['symbol'] = df_pandas['permno'].map(permno_to_symbol)
+
+            # Convert to polars
+            df_polars = pl.from_pandas(df_pandas)
+
+            # Split by symbol
+            for symbol in symbol_to_permno.keys():
+                symbol_df = (
+                    df_polars
+                    .filter(pl.col('symbol') == symbol)
+                    .with_columns([
+                        pl.col('date').cast(pl.Date).alias('timestamp'),
+                        pl.col('close').cast(pl.Float64),
+                        pl.col('volume').cast(pl.Int64)
+                    ])
+                    .select(['timestamp', 'close', 'volume'])
+                )
+
+                if len(symbol_df) > 0:
+                    result_dict[symbol] = symbol_df
 
         self.logger.info(f"Successfully fetched {len(result_dict)}/{len(symbols)} symbols")
         if failed_symbols:
-            self.logger.warning(f"Failed symbols ({len(failed_symbols)}): {', '.join(failed_symbols)}")
+            self.logger.warning(f"Failed symbols ({len(failed_symbols)}): {', '.join(failed_symbols[:20])}")
+            if len(failed_symbols) > 20:
+                self.logger.warning(f"... and {len(failed_symbols) - 20} more")
 
         return result_dict
 
