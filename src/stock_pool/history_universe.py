@@ -1,22 +1,22 @@
 import polars as pl
 from pathlib import Path
 from typing import List, Optional
+import datetime as dt
 from master.security_master import SymbolNormalizer, SecurityMaster
 
-year = 2010
-month = 1
 
-
-def get_hist_universe_crsp(year: int, month: int) -> pl.DataFrame:
+def get_hist_universe_crsp(day: str) -> pl.DataFrame:
     """
     Historical universe common stock list from CRSP database
     Ticker name has no '-' or '.', e.g. BRK.B in alpaca, BRK-B in SEC, BRKB in CRSP
 
-    :param year: Year to fetch
-    :param month: Month to fetch
+    :param day: Date string in format "YYYY-MM-DD" (only year and month are used for filtering)
     :return: DataFrame with columns: Ticker (CRSP format), Name
+
+    Note: Filters by year and month only, since history_symbols.csv typically has one entry per month
     """
     file_path = Path("data/symbols/history_symbols.csv")
+    date = dt.datetime.strptime(day, '%Y-%m-%d').date()
 
     q = (
         pl.scan_csv(file_path)
@@ -26,8 +26,8 @@ def get_hist_universe_crsp(year: int, month: int) -> pl.DataFrame:
             pl.col('COMNAM').alias('Name')
         )
         .filter(
-            pl.col('date').dt.year().eq(year),
-            pl.col('date').dt.month().eq(month)
+            pl.col('date').dt.year().eq(date.year),
+            pl.col('date').dt.month().eq(date.month)
         )
         .select(['Ticker', 'Name'])
         .drop_nulls()
@@ -37,8 +37,7 @@ def get_hist_universe_crsp(year: int, month: int) -> pl.DataFrame:
 
 
 def get_hist_universe_nasdaq(
-    year: int,
-    month: int,
+    day: str,
     with_validation: bool = True
 ) -> pl.DataFrame:
     """
@@ -47,8 +46,7 @@ def get_hist_universe_nasdaq(
     Uses SymbolNormalizer with SecurityMaster validation to prevent false matches
     between delisted stocks and new stocks with similar symbols.
 
-    :param year: Year to fetch
-    :param month: Month to fetch
+    :param day: Trade day with format "YYYY-MM-DD"
     :param with_validation: Use SecurityMaster to validate symbol conversions
     :return: DataFrame with columns: Ticker (Nasdaq format), Name
 
@@ -57,13 +55,11 @@ def get_hist_universe_nasdaq(
         # Returns: BRK.B, AAPL, GOOGL, etc. (Nasdaq format)
     """
     # Get historical universe in CRSP format
-    crsp_df = get_hist_universe_crsp(year, month)
+    crsp_df = get_hist_universe_crsp(day)
     crsp_symbols = crsp_df['Ticker'].to_list()
 
-    # Build date string for validation
-    day = f"{year}-{month:02d}-15"  # Use mid-month date
-
     # Initialize normalizer with optional SecurityMaster validation
+    sm = None
     if with_validation:
         sm = SecurityMaster()
         normalizer = SymbolNormalizer(security_master=sm)
@@ -72,6 +68,10 @@ def get_hist_universe_nasdaq(
 
     # Convert to Nasdaq format with validation
     nasdaq_symbols = normalizer.batch_normalize(crsp_symbols, day=day if with_validation else None)
+
+    # Close SecurityMaster connection if used
+    if sm is not None:
+        sm.close()
 
     # Create result DataFrame
     result = pl.DataFrame({
@@ -83,11 +83,15 @@ def get_hist_universe_nasdaq(
 
 
 if __name__ == "__main__":
+    year = 2010
+    month = 1
+    day = "2010-01-01"
+    
     print("=" * 70)
     print(f"Example 1: Historical Universe - CRSP Format ({year}-{month:02d})")
     print("=" * 70)
 
-    crsp_df = get_hist_universe_crsp(year, month)
+    crsp_df = get_hist_universe_crsp(day)
     crsp_symbols = crsp_df['Ticker'].to_list()
     print(f"\nTotal symbols (CRSP format): {len(crsp_symbols)}")
     print(f"First 10 symbols: {crsp_symbols[:10]}")
@@ -97,7 +101,7 @@ if __name__ == "__main__":
     print("=" * 70)
 
     # Get both CRSP and Nasdaq format
-    nasdaq_df = get_hist_universe_nasdaq(year, month, with_validation=False)
+    nasdaq_df = get_hist_universe_nasdaq(day, with_validation=False)
     nasdaq_symbols = nasdaq_df['Ticker'].to_list()
 
     # Find symbols that changed
