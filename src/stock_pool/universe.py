@@ -88,9 +88,14 @@ def is_common_stock(name: str) -> bool:
     return True
 
 
-def fetch_all_stocks(with_filter=True, logger=None) -> pd.DataFrame:
+def fetch_all_stocks(with_filter=True, refresh=True, logger=None) -> pd.DataFrame:
     """
-    Connects to ftp.nasdaqtrader.com to fetch the current ticker list.
+    Fetches or loads the current ticker list.
+
+    :param with_filter: If True, filters out ETFs, test issues, and non-common stocks
+    :param refresh: If True, fetches fresh data from Nasdaq FTP. If False, reads from existing stock_exchange.csv
+    :param logger: Logger instance
+    :return: DataFrame with Ticker and Name columns
     """
     ftp_host = "ftp.nasdaqtrader.com"
     ftp_dir = "SymbolDirectory"
@@ -99,6 +104,17 @@ def fetch_all_stocks(with_filter=True, logger=None) -> pd.DataFrame:
     if not logger:
         log_dir = Path("data/logs/symbols")
         logger = setup_logger("symbols", log_dir, logging.INFO, console_output=True)
+
+    # If refresh=False, try to read from existing CSV
+    if not refresh:
+        csv_path = Path("data/symbols/stock_exchange.csv")
+        if csv_path.exists():
+            logger.info(f"Loading symbols from existing CSV: {csv_path}")
+            df = pd.read_csv(csv_path)
+            logger.info(f"Loaded {len(df)} symbols from cache")
+            return df
+        else:
+            logger.warning(f"CSV file not found at {csv_path}, fetching fresh data instead")
 
     try:
         logger.info(f"Connecting to FTP: {ftp_host}...")

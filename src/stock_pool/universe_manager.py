@@ -15,26 +15,26 @@ class UniverseManager:
     def __init__(self):
         self.store_dir = Path("data/symbols")
         self.store_dir.mkdir(parents=True, exist_ok=True)
-        self.top_3000 = None
+
         log_dir = Path("data/logs/symbols")
         self.logger = setup_logger("symbols", log_dir, logging.INFO, console_output=True)
+
+        # Initialize fetchers once to reuse connections
+        self.crsp_fetcher = CRSPDailyTicks()
+        self.alpaca_fetcher = Ticks()
 
     def get_current_symbols(self, refresh=False) -> list[str]:
         """
         Get the current list of common stocks from Nasdaq Trader.
-        """    
-        csv_path = Path("data/symbols/stock_exchange.csv")
-        if csv_path.exists() and not refresh:
-            self.logger.info("Loading symbols from local CSV...")
-            df = pl.read_csv(csv_path)
-            symbols = df["Ticker"].to_list()
+
+        :param refresh: If True, fetches fresh data from Nasdaq. If False, reads from cache.
+        """
+        pd_df = fetch_all_stocks(refresh=refresh, logger=self.logger)
+        if pd_df is not None and not pd_df.empty:
+            symbols = pd_df['Ticker'].tolist()
         else:
-            pd_df = fetch_all_stocks(logger=self.logger)
-            if pd_df is not None and not pd_df.empty:
-                symbols = pd_df['Ticker'].tolist()
-            else:
-                raise ValueError("Failed to fetch symbols from Nasdaq Trader.")
-                
+            raise ValueError("Failed to fetch symbols from Nasdaq Trader.")
+
         self.logger.info(f"Market Universe Size: {len(symbols)} tickers")
         return symbols
     
@@ -62,12 +62,11 @@ class UniverseManager:
         self.logger.info(f"Fetching recent data for {len(symbols)} symbols using {source}...")
 
         # Fetch recent data (returns Dict[str, pl.DataFrame])
+        # Use pre-initialized fetchers to avoid reconnecting to databases
         if source.lower() == 'crsp':
-            fetcher = CRSPDailyTicks()
-            recent_data = fetcher.recent_daily_ticks(symbols, end_day=day)
+            recent_data = self.crsp_fetcher.recent_daily_ticks(symbols, end_day=day)
         elif source.lower() == 'alpaca':
-            fetcher = Ticks()
-            recent_data = fetcher.recent_daily_ticks(symbols, end_day=day)
+            recent_data = self.alpaca_fetcher.recent_daily_ticks(symbols, end_day=day)
         else:
             raise ValueError(f"Invalid source: {source}. Must be 'crsp' or 'alpaca'")
 
@@ -103,7 +102,7 @@ class UniverseManager:
         self.logger.info(f"Rank {len(liquidity_df)} Stock: {bottom_stock[0]} (ADV: ${bottom_stock[1]:,.0f})")
 
         result = liquidity_df['symbol'].to_list()
-        self.top_3000 = result
+
         return result
 
 if __name__ == "__main__":
