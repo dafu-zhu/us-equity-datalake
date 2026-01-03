@@ -6,6 +6,7 @@ import polars as pl
 import logging
 from typing import Dict
 from collection.crsp_ticks import CRSPDailyTicks
+from collection.alpaca_ticks import Ticks
 from stock_pool.universe import fetch_all_stocks
 from stock_pool.history_universe import get_hist_universe_nasdaq
 from utils.logger import setup_logger
@@ -49,19 +50,26 @@ class UniverseManager:
         
         return symbols
 
-    def get_top_3000(self, day: str, symbols: list[str]) -> list[str]:
+    def get_top_3000(self, day: str, symbols: list[str], source: str) -> list[str]:
         """
         Fetch recent data and calculate top 3000 most liquid stocks (in-memory).
 
         :param day: Date string in format "YYYY-MM-DD"
         :param symbols: List of symbols to analyze
+        :param source: 'crsp' or 'alpaca'
         :return: List of top 3000 symbols ranked by average dollar volume
         """
-        self.logger.info(f"Fetching recent data for {len(symbols)} symbols...")
+        self.logger.info(f"Fetching recent data for {len(symbols)} symbols using {source}...")
 
         # Fetch recent data (returns Dict[str, pl.DataFrame])
-        fetcher = CRSPDailyTicks()
-        recent_data = fetcher.recent_daily_ticks(symbols, end_day=day)
+        if source.lower() == 'crsp':
+            fetcher = CRSPDailyTicks()
+            recent_data = fetcher.recent_daily_ticks(symbols, end_day=day)
+        elif source.lower() == 'alpaca':
+            fetcher = Ticks()
+            recent_data = fetcher.recent_daily_ticks(symbols, end_day=day)
+        else:
+            raise ValueError(f"Invalid source: {source}. Must be 'crsp' or 'alpaca'")
 
         self.logger.info(f"Data fetched for {len(recent_data)} symbols, calculating liquidity...")
 
@@ -100,11 +108,12 @@ class UniverseManager:
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("Example: Get Top 3000 Most Liquid Stocks")
+    print("Example: Get Top 3000 Most Liquid Stocks (Alpaca)")
     print("=" * 70)
 
     um = UniverseManager()
-    day = "2011-01-01"
+    day = "2026-01-02"
+    source = "alpaca"  # Use Alpaca for recent data
 
     # Parse date
     date = dt.datetime.strptime(day, '%Y-%m-%d')
@@ -112,6 +121,7 @@ if __name__ == "__main__":
 
     print(f"\nTarget date: {day}")
     print(f"Year: {year}")
+    print(f"Data source: {source}")
 
     # Step 1: Get universe (historical or current)
     print("\n" + "-" * 70)
@@ -133,7 +143,7 @@ if __name__ == "__main__":
     print("-" * 70)
 
     start = time.perf_counter()
-    top_3000 = um.get_top_3000(day, all_symbols)
+    top_3000 = um.get_top_3000(day, all_symbols, source)
     elapsed = time.perf_counter() - start
 
     print(f"\nTop 3000 calculation complete!")
