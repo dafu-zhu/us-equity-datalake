@@ -12,6 +12,7 @@ import datetime as dt
 from pathlib import Path
 from master.security_master import SecurityMaster
 from utils.logger import setup_logger
+from utils.mapping import align_calendar
 import logging
 
 load_dotenv()
@@ -123,8 +124,8 @@ class CRSPDailyTicks:
     def get_daily_range(
             self, 
             symbol: str, 
-            start_date: str, 
-            end_date: str, 
+            start_day: str, 
+            end_day: str, 
             adjusted: bool=True, 
             auto_resolve: bool=True
         ) -> List[Dict[str, Any]]:
@@ -135,8 +136,8 @@ class CRSPDailyTicks:
         Returns one dict per trading day with OHLCV data
 
         :param symbol: Ticker symbol (can be current or historical)
-        :param start_date: Start date in 'YYYY-MM-DD' format
-        :param end_date: End date in 'YYYY-MM-DD' format (inclusive)
+        :param start_day: Start date in 'YYYY-MM-DD' format
+        :param end_day: End date in 'YYYY-MM-DD' format (inclusive)
         :param adjusted: If True, apply split adjustments
         :param auto_resolve: Enable auto_resolve to find security across symbol changes
         :return: List of dicts, one per trading day
@@ -146,7 +147,7 @@ class CRSPDailyTicks:
             # Returns data for FB (2021-2022) and META (2022-2023)
         """
         # Resolve symbol to security_id (use end_date as reference point)
-        sid = self.security_master.get_security_id(symbol, end_date, auto_resolve=auto_resolve)
+        sid = self.security_master.get_security_id(symbol, end_day, auto_resolve=auto_resolve)
         permno = self.security_master.sid_to_permno(sid)
 
         # Build query for date range
@@ -161,8 +162,8 @@ class CRSPDailyTicks:
                     vol * cfacshr as volume
                 FROM crsp.dsf
                 WHERE permno = {permno}
-                    AND date >= '{start_date}'
-                    AND date <= '{end_date}'
+                    AND date >= '{start_day}'
+                    AND date <= '{end_day}'
                     AND prc IS NOT NULL
                 ORDER BY date ASC
             """
@@ -177,8 +178,8 @@ class CRSPDailyTicks:
                     vol as volume
                 FROM crsp.dsf
                 WHERE permno = {permno}
-                    AND date >= '{start_date}'
-                    AND date <= '{end_date}'
+                    AND date >= '{start_day}'
+                    AND date <= '{end_day}'
                     AND prc IS NOT NULL
                 ORDER BY date ASC
             """
@@ -338,6 +339,40 @@ class CRSPDailyTicks:
                 self.logger.warning(f"... and {len(failed_symbols) - 20} more")
 
         return result_dict
+
+    def collect_daily_ticks(self, symbol: str, year: int, month: int, adjusted: bool=True, auto_resolve: bool=True) -> List[Dict[str, Any]]:
+        """
+        Collect daily ticks for a specific month and return as DataFrame.
+
+        :param symbol: Stock symbol (CRSP format, e.g., 'BRKB', 'AAPL')
+        :param year: Year (e.g., 2024)
+        :param month: Month (1-12)
+        :param adjusted: If True, apply split adjustments (default: True)
+        :param auto_resolve: Enable auto_resolve to handle symbol changes (default: True)
+        :return: Polars DataFrame with daily OHLCV data
+        """
+        # Calculate month range
+        start_date_obj = dt.date(year, month, 1)
+        if month == 12:
+            end_date_obj = dt.date(year, 12, 31)
+        else:
+            end_date_obj = dt.date(year, month + 1, 1) - dt.timedelta(days=1)
+
+        start_date = start_date_obj.strftime('%Y-%m-%d')
+        end_date = end_date_obj.strftime('%Y-%m-%d')
+
+        # Fetch data using get_daily_range
+        daily_data = self.get_daily_range(
+            symbol=symbol,
+            start_day=start_date,
+            end_day=end_date,
+            adjusted=adjusted,
+            auto_resolve=auto_resolve
+        )
+        
+        result = align_calendar(daily_data, start_date_obj, end_date_obj, self.calendar_path)
+
+        return result
 
     def close(self):
         """Close WRDS connection"""

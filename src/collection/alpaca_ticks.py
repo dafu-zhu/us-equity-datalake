@@ -13,6 +13,7 @@ from pathlib import Path
 
 from collection.models import TickField, TickDataPoint
 from utils.logger import LoggerFactory
+from utils.mapping import align_calendar
 
 load_dotenv()
 
@@ -61,26 +62,6 @@ class Ticks:
         # Transform into UTC time
         start_str = start_et.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
         end_str = end_et.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
-
-        return start_str, end_str
-
-    @staticmethod
-    def get_year_range(year: int) -> Tuple[str, str]:
-        """
-        Get the UTC time range - start_day and end_day - for a full year (Jan 1 - Dec 31)
-
-        :param year: Year as string or integer
-        :return: start, end in UTC format
-        """
-        if isinstance(year, str):
-            year = int(year)
-
-        # Create start and end dates in UTC
-        start = dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc)
-        end = dt.datetime(year, 12, 31, 23, 59, 59, tzinfo=dt.timezone.utc)
-
-        start_str = start.isoformat().replace("+00:00", "Z")
-        end_str = end.isoformat().replace("+00:00", "Z")
 
         return start_str, end_str
     
@@ -254,14 +235,32 @@ class Ticks:
         start, end = self.get_trade_day_range(trade_day)
         return self.get_ticks(symbol, start, end, "1Min")
 
-    def get_daily(self, symbol: str, year: int, adjusted: bool=True) -> List[Dict[str, Any]]:
+    def get_daily(self, symbol: str, year: int, month: int, adjusted: bool=True) -> List[Dict[str, Any]]:
         """
-        Get daily OHLCV data for a full year with adjusted prices.
+        Get daily OHLCV data for a specific month with adjusted prices.
 
+        :param symbol: Stock symbol
+        :param year: Year (e.g., 2024)
+        :param month: Month (1-12)
+        :param adjusted: If True, apply split adjustments (default: True)
         :return: List of dictionaries with OHLCV data
         """
-        start, end = self.get_year_range(year)
-        return self.get_ticks(symbol, start, end, "1Day", adjusted=adjusted)
+        # Calculate month range
+        start_date = dt.date(year, month, 1)
+        if month == 12:
+            end_date = dt.date(year, 12, 31)
+        else:
+            end_date = dt.date(year, month + 1, 1) - dt.timedelta(days=1)
+
+        # Convert to UTC timestamps for API
+        start_utc = dt.datetime.combine(start_date, dt.time(0, 0), tzinfo=dt.timezone.utc)
+        end_utc = dt.datetime.combine(end_date, dt.time(23, 59, 59), tzinfo=dt.timezone.utc)
+        start = start_utc.isoformat().replace("+00:00", "Z")
+        end = end_utc.isoformat().replace("+00:00", "Z")
+
+        result = self.get_ticks(symbol, start, end, "1Day", adjusted=adjusted)
+
+        return result
 
     @staticmethod
     def parse_ticks(ticks: List[Dict[str, Any]]) -> List[TickDataPoint]:
@@ -300,50 +299,32 @@ class Ticks:
 
         return datapoints
     
-    def collect_daily_ticks(self, symbol: str, year: int, adjusted: bool=True) -> List[Dict[str, Any]]:
+    def collect_daily_ticks(self, symbol: str, year: int, month: int, adjusted: bool=True) -> List[Dict[str, Any]]:
         """
-        Given a year, collect daily ticks of the symbol for that year
+        Collect daily ticks for a specific month and return as list of dicts (JSON format), align with trading days.
+
+        :param symbol: Stock symbol
+        :param year: Year (e.g., 2024)
+        :param month: Month (1-12)
+        :param adjusted: If True, apply split adjustments (default: True)
+        :return: List of dictionaries with daily OHLCV data
         """
-        ticks = self.get_daily(symbol, year, adjusted)
+        ticks = self.get_daily(symbol, year, month, adjusted)
         parsed_ticks: List[TickDataPoint] = self.parse_ticks(ticks)
 
         # Transform dataclass to dictionaries
         ticks_data = [asdict(dp) for dp in parsed_ticks]
 
-        # Define date range
-        start_date = dt.date(year, 1, 1)
-        end_date = dt.date(year, 12, 31)
+        # Define date range for the month
+        start_date = dt.date(year, month, 1)
+        if month == 12:
+            end_date = dt.date(year, 12, 31)
+        else:
+            end_date = dt.date(year, month + 1, 1) - dt.timedelta(days=1)
 
         # Merge with master calendar
         calendar_path = self.calendar_dir / "master.parquet"
-        calendar_lf = (
-            pl.scan_parquet(calendar_path)
-            .filter(pl.col('timestamp').is_between(start_date, end_date))
-            .sort('timestamp')
-            .lazy()
-        )
-
-        ticks_lf = (
-            pl.DataFrame(ticks_data)
-            .with_columns([
-                pl.col('timestamp').str.to_datetime(format='%Y-%m-%dT%H:%M:%S').dt.date(),
-                pl.col('open').cast(pl.Float64),
-                pl.col('high').cast(pl.Float64),
-                pl.col('low').cast(pl.Float64),
-                pl.col('close').cast(pl.Float64),
-                pl.col('volume').cast(pl.Int64)
-            ])
-            .drop(["num_trades", "vwap"])
-            .lazy()
-        )
-        calendar_lf = calendar_lf.join_asof(ticks_lf, on='timestamp')
-
-        # Collect, convert timestamp to string, and convert to JSON format
-        result = (
-            calendar_lf.collect()
-            .with_columns(pl.col('timestamp').dt.strftime('%Y-%m-%d'))
-            .to_dicts()
-        )
+        result = align_calendar(ticks_data, start_date, end_date, calendar_path)
 
         return result
     
@@ -429,14 +410,14 @@ if __name__ == "__main__":
 
     symbol = "AAPL"
     year = 2024
+    month = 12
 
-    print(f"Fetching daily ticks for {symbol} in {year}...")
-    daily_ticks = ticks.collect_daily_ticks(symbol=symbol, year=year, adjusted=True)
+    print(f"Fetching daily ticks for {symbol} in {year}-{month:02d}...")
+    daily_ticks = ticks.collect_daily_ticks(symbol=symbol, year=year, month=month, adjusted=True)
 
     print(f"\nTotal records: {len(daily_ticks)}")
     print("\nFirst 3 records:")
-    for tick in daily_ticks[:3]:
-        print(tick)
+    print(daily_ticks[:3])
 
     # Example 3: Fetch minute ticks for a specific day (returns DataFrame)
     print("\n" + "=" * 70)

@@ -171,8 +171,8 @@ class Fundamental:
         # Load master calendar and merge
         calendar_lf: pl.LazyFrame = (
             pl.scan_parquet(self.calendar_path)
-            .filter(pl.col("Date").is_between(start_date, end_date))
-            .sort('Date')
+            .filter(pl.col("timestamp").is_between(start_date, end_date))
+            .sort('timestamp')
             .lazy()
         )
 
@@ -190,20 +190,20 @@ class Fundamental:
                 tmp_lf = (
                     pl.DataFrame(
                         values,
-                        schema=['Date', field_name],
+                        schema=['timestamp', field_name],
                         orient='row'
                     )
                     .with_columns(
                         pl.col(field_name).cast(pl.Float64)
                     )
-                    .sort('Date')
+                    .sort('timestamp')
                     .drop_nulls(subset=[field_name])
                     .lazy()
                 )
 
                 calendar_lf = calendar_lf.join_asof(
                     tmp_lf,
-                    on='Date',
+                    on='timestamp',
                     strategy='backward'
                 )
         
