@@ -1,4 +1,8 @@
 import requests
+import polars as pl
+import datetime as dt
+from typing import List, Dict, Any
+from pathlib import Path
 
 
 def symbol_cik_mapping() -> dict:
@@ -16,6 +20,48 @@ def symbol_cik_mapping() -> dict:
                     symbol_cik[symbol] = value.get('cik_str')
         
         return symbol_cik
+
+def align_calendar(
+        data: List[Dict[str, Any]], 
+        start_date: dt.date, 
+        end_date: dt.date, 
+        calendar_path: Path
+    ) -> List[Dict[str, Any]]:
+    # Align with trading days
+    calendar_lf = (
+        pl.scan_parquet(calendar_path)
+        .filter(pl.col('timestamp').is_between(start_date, end_date))
+        .sort('timestamp')
+        .lazy()
+    )
+
+    # Create DataFrame and conditionally drop optional columns
+    ticks_df = pl.DataFrame(data).with_columns([
+        pl.col('timestamp').str.to_date(format='%Y-%m-%d'),
+        pl.col('open').cast(pl.Float64),
+        pl.col('high').cast(pl.Float64),
+        pl.col('low').cast(pl.Float64),
+        pl.col('close').cast(pl.Float64),
+        pl.col('volume').cast(pl.Int64)
+    ])
+
+    # Drop optional columns only if they exist
+    optional_cols = ["num_trades", "vwap"]
+    cols_to_drop = [col for col in optional_cols if col in ticks_df.columns]
+    if cols_to_drop:
+        ticks_df = ticks_df.drop(cols_to_drop)
+
+    ticks_lf = ticks_df.sort('timestamp').lazy()
+    calendar_lf = calendar_lf.join_asof(ticks_lf, on='timestamp')
+
+    # Collect, convert timestamp to string, and return as list of dicts
+    result = (
+        calendar_lf.collect()
+        .with_columns(pl.col('timestamp').dt.strftime('%Y-%m-%d'))
+        .to_dicts()
+    )
+
+    return result
 
 if __name__ == "__main__":
     mp = symbol_cik_mapping()
