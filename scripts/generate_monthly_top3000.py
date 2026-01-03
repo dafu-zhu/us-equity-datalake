@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 import datetime as dt
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Add src to path so we can import modules
 src_path = Path(__file__).parent.parent / "src"
@@ -20,6 +21,58 @@ sys.path.insert(0, str(src_path))
 
 from stock_pool.universe_manager import UniverseManager
 from utils.logger import setup_logger
+
+
+def process_single_month(month_date, um, total_months, month_index):
+    """
+    Process a single month: get universe and calculate top 3000.
+
+    :param month_date: Date object for the month
+    :param um: UniverseManager instance
+    :param total_months: Total number of months
+    :param month_index: Index of this month (1-based)
+    :return: Tuple (success, stats_update, log_message)
+    """
+    year = month_date.year
+    month = month_date.month
+    fetch_date_str = f"{year}-{month:02d}-01"
+
+    # Determine output path
+    output_dir = Path(f"data/symbols/{year}/{month:02d}")
+    output_file = output_dir / "universe_top3000.txt"
+
+    # Skip if file already exists
+    if output_file.exists():
+        return (True, 'skipped', f"[{month_index}/{total_months}] {year}-{month:02d}: SKIPPED (file exists)")
+
+    try:
+        # Step 1: Get stock universe
+        if year < 2025:
+            all_symbols = um.get_hist_symbols(fetch_date_str)
+            universe_type = "historical"
+        else:
+            all_symbols = um.get_current_symbols(refresh=False)
+            universe_type = "current"
+
+        # Step 2: Get top 3000 based on liquidity (includes I/O in recent_daily_ticks)
+        source = 'crsp' if year < 2025 else 'alpaca'
+        top_3000 = um.get_top_3000(fetch_date_str, all_symbols, source)
+
+        if len(top_3000) == 0:
+            return (False, 'failed', f"[{month_index}/{total_months}] {year}-{month:02d}: FAILED (no symbols)")
+
+        # Step 3: Write to file
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with open(output_file, 'w') as f:
+            for symbol in top_3000:
+                f.write(f"{symbol}\n")
+
+        msg = (f"[{month_index}/{total_months}] {year}-{month:02d}: SUCCESS "
+               f"({len(all_symbols)} {universe_type} → {len(top_3000)} top, source: {source})")
+        return (True, 'successful', msg)
+
+    except Exception as e:
+        return (False, 'failed', f"[{month_index}/{total_months}] {year}-{month:02d}: ERROR - {str(e)}")
 
 
 def main():
@@ -66,65 +119,42 @@ def main():
     failed = 0
     skipped = 0
 
-    for idx, month_date in enumerate(months, 1):
-        year = month_date.year
-        month = month_date.month
+    # Process months in parallel using ThreadPoolExecutor
+    # Since recent_daily_ticks is I/O bound, threading will improve performance
+    MAX_WORKERS = 10
 
-        # Determine the fetch date (YYYY-MM-01)
-        fetch_date_str = f"{year}-{month:02d}-01"
+    logger.info(f"Using {MAX_WORKERS} parallel workers for data fetching")
+    logger.info("")
 
-        # Determine output path
-        output_dir = Path(f"data/symbols/{year}/{month:02d}")
-        output_file = output_dir / "universe_top3000.txt"
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Submit all months for processing
+        future_to_month = {
+            executor.submit(process_single_month, month_date, um, total_months, idx): (idx, month_date)
+            for idx, month_date in enumerate(months, 1)
+        }
 
-        # Skip if file already exists
-        if output_file.exists():
-            logger.info(f"[{idx}/{total_months}] {year}-{month:02d}: SKIPPED (file exists)")
-            skipped += 1
-            continue
+        # Process results as they complete
+        for future in as_completed(future_to_month):
+            idx, month_date = future_to_month[future]
+            try:
+                success, stat_type, message = future.result()
 
-        logger.info(f"[{idx}/{total_months}] Processing {year}-{month:02d} using {fetch_date_str}...")
+                # Update statistics
+                if stat_type == 'successful':
+                    successful += 1
+                elif stat_type == 'failed':
+                    failed += 1
+                elif stat_type == 'skipped':
+                    skipped += 1
 
-        try:
-            # Step 1: Get stock universe
-            if year < 2025:
-                all_symbols = um.get_hist_symbols(fetch_date_str)
-                logger.info(f"  Historical universe: {len(all_symbols)} symbols")
-            else:
-                all_symbols = um.get_current_symbols(refresh=False)
-                logger.info(f"  Current universe: {len(all_symbols)} symbols")
+                # Log the result
+                logger.info(message)
 
-            # Step 2: Get top 3000 based on liquidity
-            # Use 'crsp' for historical data (< 2025), 'alpaca' for recent data
-            source = 'crsp' if year < 2025 else 'alpaca'
-            logger.info(f"  Calculating top 3000 using {source} data...")
-
-            top_3000 = um.get_top_3000(fetch_date_str, all_symbols, source)
-
-            if len(top_3000) == 0:
-                logger.error(f"  Failed to get top 3000 for {fetch_date_str}")
+            except Exception as e:
+                year = month_date.year
+                month = month_date.month
+                logger.error(f"[{idx}/{total_months}] {year}-{month:02d}: EXCEPTION - {str(e)}", exc_info=True)
                 failed += 1
-                continue
-
-            logger.info(f"  Top 3000 calculated: {len(top_3000)} symbols")
-
-            # Step 3: Write to file
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            with open(output_file, 'w') as f:
-                for symbol in top_3000:
-                    f.write(f"{symbol}\n")
-
-            logger.info(f"  Written to {output_file}")
-            logger.info(f"  SUCCESS")
-            successful += 1
-
-        except Exception as e:
-            logger.error(f"  ERROR: {str(e)}", exc_info=True)
-            failed += 1
-            continue
-
-        logger.info("")
 
     # Final summary
     logger.info("=" * 80)
