@@ -388,7 +388,11 @@ class CRSPDailyTicks:
             adjusted=adjusted,
             auto_resolve=auto_resolve
         )
-        
+
+        # Handle empty data case (symbol not active in this period)
+        if not daily_data:
+            return []
+
         result = align_calendar(daily_data, start_date_obj, end_date_obj, self.calendar_path)
 
         return result
