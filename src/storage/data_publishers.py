@@ -27,18 +27,15 @@ class DataPublishers:
 
     def __init__(
         self,
-        validator,
         upload_fileobj_func: Callable,
         logger: logging.Logger
     ):
         """
         Initialize data publishers.
 
-        :param validator: Validator instance for checking data existence
         :param upload_fileobj_func: Function to upload file objects to S3
         :param logger: Logger instance
         """
-        self.validator = validator
         self.upload_fileobj = upload_fileobj_func
         self.logger = logger
 
@@ -46,8 +43,7 @@ class DataPublishers:
         self,
         sym: str,
         year: int,
-        df: pl.DataFrame,
-        overwrite: bool = False
+        df: pl.DataFrame
     ) -> Dict[str, Optional[str]]:
         """
         Publish daily ticks for a single symbol for entire year to S3.
@@ -59,16 +55,8 @@ class DataPublishers:
         :param sym: Symbol in Alpaca format (e.g., 'BRK.B')
         :param year: Year to fetch data for
         :param df: Polars DataFrame with daily ticks data
-        :param overwrite: If True, skip existence check and overwrite existing data
         :return: Dict with status info
         """
-        if not overwrite and self.validator.data_exists(sym, 'ticks', year):
-            return {
-                'symbol': sym,
-                'status': 'canceled',
-                'error': f'Symbol {sym} for {year} already exists'
-            }
-
         try:
             # Check if DataFrame is empty (no rows fetched)
             if len(df) == 0:
@@ -196,8 +184,7 @@ class DataPublishers:
         cik: Optional[str],
         dei_fields: List[str],
         gaap_fields: List[str],
-        sec_rate_limiter,
-        overwrite: bool = False
+        sec_rate_limiter
     ) -> Dict[str, Optional[str]]:
         """
         Publish fundamental data for a single symbol for an entire year to S3.
@@ -212,16 +199,8 @@ class DataPublishers:
         :param dei_fields: DEI fields to collect
         :param gaap_fields: US-GAAP fields to collect
         :param sec_rate_limiter: Rate limiter for SEC API
-        :param overwrite: If True, skip existence check and overwrite existing data
         :return: Dict with status info
         """
-        if not overwrite and self.validator.data_exists(sym, 'fundamental', year):
-            return {
-                'symbol': sym,
-                'status': 'canceled',
-                'error': f'Symbol {sym} for {year} already exists'
-            }
-
         try:
             if cik is None:
                 self.logger.warning(f'Skipping {sym}: No CIK found (should have been filtered earlier)')

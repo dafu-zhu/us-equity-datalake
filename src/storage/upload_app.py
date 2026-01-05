@@ -82,7 +82,6 @@ class UploadApp:
         )
 
         self.data_publishers = DataPublishers(
-            validator=self.validator,
             upload_fileobj_func=self.upload_fileobj,
             logger=self.logger
         )
@@ -182,11 +181,19 @@ class UploadApp:
         :param year: Year to fetch data for
         :param overwrite: If True, skip existence check and overwrite existing data
         """
+        # Validate: Check if data already exists (before collection)
+        if not overwrite and self.validator.data_exists(sym, 'ticks', year):
+            return {
+                'symbol': sym,
+                'status': 'canceled',
+                'error': f'Symbol {sym} for {year} already exists'
+            }
+
         # Fetch data for entire year
         df = self.data_collectors.collect_daily_ticks_year(sym, year)
 
         # Publish to S3
-        return self.data_publishers.publish_daily_ticks(sym, year, df, overwrite)
+        return self.data_publishers.publish_daily_ticks(sym, year, df)
 
     def upload_daily_ticks(self, year: int, overwrite: bool = False):
         """
@@ -456,6 +463,14 @@ class UploadApp:
         :param overwrite: If True, skip existence check and overwrite existing data
         :param cik: Pre-fetched CIK (if None, will look up)
         """
+        # Validate: Check if data already exists (before collection)
+        if not overwrite and self.validator.data_exists(sym, 'fundamental', year):
+            return {
+                'symbol': sym,
+                'status': 'canceled',
+                'error': f'Symbol {sym} for {year} already exists'
+            }
+
         # Use CIKResolver if CIK not provided
         if cik is None:
             reference_date = f"{year}-06-30"  # Mid-year reference
@@ -468,8 +483,7 @@ class UploadApp:
             cik=cik,
             dei_fields=dei_fields,
             gaap_fields=gaap_fields,
-            sec_rate_limiter=self.sec_rate_limiter,
-            overwrite=overwrite
+            sec_rate_limiter=self.sec_rate_limiter
         )
 
     def fundamental(self, year: int, max_workers: int = 50, overwrite: bool = False):
@@ -761,6 +775,6 @@ if __name__ == "__main__":
     app = UploadApp()
     try:
         # Example: Run from 2010 to 2025 (yearly processing)
-        app.run(start_year=2025, end_year=2026, overwrite=True)
+        app.run(start_year=2010, end_year=2024, overwrite=False)
     finally:
         app.close()
