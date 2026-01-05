@@ -381,7 +381,7 @@ class Fundamental:
         self.fields_df = result_df
         return result_df
 
-    def collect_fields(
+    def collect_fields_ffill(
         self,
         start_day: str,
         end_day: str,
@@ -432,5 +432,5 @@ if __name__ == "__main__":
 
     start_day = f"{year}-01-01"
     end_day = f"{year}-12-31"
-    collect_df = fund.collect_fields(start_day, end_day, fields_dict)
+    collect_df = fund.collect_fields_ffill(start_day, end_day, fields_dict)
     print(collect_df.head())
