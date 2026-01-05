@@ -7,8 +7,56 @@ from pathlib import Path
 from collections import defaultdict
 import polars as pl
 import json
+import yaml
 
 HEADER = {'User-Agent': 'name@example.com'}
+
+FIELD_CONFIG_PATH = Path("data/config/approved_mapping.yaml")
+
+with open(FIELD_CONFIG_PATH) as file:
+    MAPPINGS = yaml.safe_load(file)
+
+
+def extract_concept(facts: dict, concept: str) -> Optional[dict]:
+    """
+    Extract a financial concept from SEC XBRL facts using mapping candidates.
+
+    Searches through gaap_candidates in priority order and returns the first available field.
+
+    :param facts: Complete facts dictionary from SEC EDGAR API response
+    :param concept: Concept name as defined in MAPPINGS (e.g., 'revenue', 'total assets')
+    :return: Field data with units structure, or None if concept not found
+    :raises KeyError: If concept not defined in MAPPINGS
+    :raises ValueError: If tag format is invalid
+
+    Example:
+        >>> facts = {'us-gaap': {'Revenues': {'units': {'USD': [...]}}}}
+        >>> extract_concept(facts, 'revenue')
+        {'units': {'USD': [...]}}
+    """
+    if concept not in MAPPINGS:
+        raise KeyError(f"Concept '{concept}' not defined in MAPPINGS")
+
+    mapping = MAPPINGS[concept]
+    tags = mapping['gaap_candidates']
+
+    for tag in tags:
+        if ':' in tag:
+            prefix, local = tag.split(':', 1)  # Use maxsplit=1 in case local name has ':'
+        else:
+            raise ValueError(f'Tag must include prefix: {tag}')
+
+        # Check if prefix exists in facts
+        if prefix not in facts:
+            continue
+
+        # Check if local tag exists in the prefix namespace
+        if local in facts[prefix]:
+            return facts[prefix][local]
+
+    # No matching tag found for this concept
+    return None
+
 
 class Fundamental:
     def __init__(self, cik: str, symbol: Optional[str] = None) -> None:
