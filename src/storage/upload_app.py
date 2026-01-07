@@ -7,6 +7,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 import polars as pl
 
@@ -522,8 +523,9 @@ class UploadApp:
             chunk_size: int=30,
             sleep_time: float=0.02,
             run_fundamental: bool=False,
-            run_daily_ticks: bool=True,
-            run_minute_ticks: bool=False
+            run_daily_ticks: bool=False,
+            run_minute_ticks: bool=False,
+            run_top_3000: bool=False
         ) -> None:
         """
         Run the complete workflow, fetch and upload fundamental, daily ticks and minute ticks data within the period
@@ -542,6 +544,7 @@ class UploadApp:
         :param run_fundamental: If True, upload fundamental data
         :param run_daily_ticks: If True, upload daily ticks data
         :param run_minute_ticks: If True, upload minute ticks data (all months for each year)
+        :param run_top_3000: If True, upload the 3000 most liquid stock list
         """
         for year in range(start_year, end_year + 1):
             self.logger.info(f"Processing year {year}")
@@ -564,6 +567,70 @@ class UploadApp:
                 else:
                     self.logger.info(f"Skipping minute ticks for {year} (data only available from 2017+)")
 
+            if run_top_3000:
+                self.upload_top_3000_monthly(year, overwrite=overwrite)
+
+    def upload_top_3000_monthly(
+        self,
+        year: int,
+        overwrite: bool = False,
+        auto_resolve: bool = True
+    ) -> None:
+        """
+        Upload top 3000 stocks for each month in a given year.
+
+        Storage: data/symbols/{YYYY}/{MM}/top3000.txt
+        :param auto_resolve: If True, resolve symbol changes when using CRSP
+        """
+        symbols = self.universe_manager.load_symbols_for_year(year, sym_type='alpaca')
+        if not symbols:
+            self.logger.warning(f"No symbols available for {year}, skipping top3000 upload")
+            return
+
+        source = 'crsp' if year < 2025 else 'alpaca'
+        self.logger.info(
+            f"Starting {year} top3000 monthly upload for {len(symbols)} symbols (source={source}, overwrite={overwrite})"
+        )
+
+        for month in range(1, 13):
+            if not overwrite and self.validator.top_3000_exists(year, month):
+                self.logger.info(f"Skipping {year}-{month:02d}: top3000 already exists")
+                continue
+
+            trading_days = self.calendar.load_trading_days(year, month)
+            if not trading_days:
+                self.logger.warning(f"No trading days found for {year}-{month:02d}, skipping")
+                continue
+
+            as_of = trading_days[-1]
+            top_3000 = self.universe_manager.get_top_3000(
+                as_of,
+                symbols,
+                source,
+                auto_resolve=auto_resolve
+            )
+
+            result = self.data_publishers.publish_top_3000(
+                year=year,
+                month=month,
+                as_of=as_of,
+                symbols=top_3000,
+                source=source
+            )
+
+            if result['status'] == 'success':
+                self.logger.info(
+                    f"Uploaded top3000 for {year}-{month:02d} (as_of={as_of}, count={len(top_3000)})"
+                )
+            elif result['status'] == 'skipped':
+                self.logger.warning(
+                    f"Skipped top3000 for {year}-{month:02d}: {result.get('error')}"
+                )
+            else:
+                self.logger.error(
+                    f"Failed top3000 for {year}-{month:02d}: {result.get('error')}"
+                )
+
     def close(self):
         """Close WRDS database connections"""
         if hasattr(self, 'crsp_ticks') and self.crsp_ticks is not None:
@@ -576,6 +643,6 @@ if __name__ == "__main__":
     app = UploadApp()
     try:
         # Example: Run from 2010 to 2025 (yearly processing)
-        app.run(start_year=2010, end_year=2024, overwrite=False)
+        app.run(start_year=2010, end_year=2026, overwrite=False, run_top_3000=True)
     finally:
         app.close()

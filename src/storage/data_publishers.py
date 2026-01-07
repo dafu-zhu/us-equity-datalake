@@ -69,7 +69,8 @@ class DataPublishers:
         content_type_map = {
             '.parquet': 'application/x-parquet',
             '.json': 'application/json',
-            '.csv': 'text/csv'
+            '.csv': 'text/csv',
+            '.txt': 'text/plain'
         }
         file_ext = Path(key).suffix
         content_type = content_type_map.get(file_ext, 'application/octet-stream')
@@ -380,3 +381,63 @@ class DataPublishers:
             cik_str = f" (CIK {cik})" if cik else ""
             self.logger.error(f'Unexpected error for {sym}{cik_str}: {e}', exc_info=True)
             return {'symbol': sym, 'status': 'failed', 'error': str(e), 'cik': cik}
+
+    def publish_top_3000(
+        self,
+        year: int,
+        month: int,
+        as_of: str,
+        symbols: List[str],
+        source: str
+    ) -> Dict[str, Optional[str]]:
+        """
+        Publish monthly top 3000 symbols to S3 as a newline-delimited text file.
+
+        Storage: data/symbols/{YYYY}/{MM}/top3000.txt
+        """
+        try:
+            if not symbols:
+                return {
+                    'status': 'skipped',
+                    'error': 'No symbols provided',
+                    'year': str(year),
+                    'month': f"{month:02d}"
+                }
+
+            content = "\n".join(symbols) + "\n"
+            buffer = io.BytesIO(content.encode("utf-8"))
+            buffer.seek(0)
+
+            s3_key = f"data/symbols/{year}/{month:02d}/top3000.txt"
+            s3_metadata = {
+                'year': str(year),
+                'month': f"{month:02d}",
+                'as_of': as_of,
+                'data_type': 'top3000',
+                'count': str(len(symbols)),
+                'source': source
+            }
+            s3_metadata_prepared = {
+                k: json.dumps(v) if isinstance(v, (list, dict)) else str(v)
+                for k, v in s3_metadata.items()
+            }
+
+            self.upload_fileobj(buffer, s3_key, s3_metadata_prepared)
+
+            return {
+                'status': 'success',
+                'error': None,
+                'year': str(year),
+                'month': f"{month:02d}"
+            }
+        except Exception as e:
+            self.logger.error(
+                f"Unexpected error publishing top3000 for {year}-{month:02d}: {e}",
+                exc_info=True
+            )
+            return {
+                'status': 'failed',
+                'error': str(e),
+                'year': str(year),
+                'month': f"{month:02d}"
+            }

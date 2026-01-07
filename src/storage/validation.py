@@ -147,11 +147,23 @@ class Validator:
             )
             return True
         except ClientError as error:
-            if error.response['Error']['Code'] == '404':
+            if error.response.get('Error', {}).get('Code') == '404':
                 return False
             else:
                 self.logger.error(f'Error checking {s3_key}: {error}')
                 return False
+    
+    def top_3000_exists(self, year: int, month: int) -> bool:
+        s3_key = f"data/symbols/{year}/{month:02d}/top3000.txt"
+        try:
+            self.s3_client.head_object(Bucket="us-equity-datalake", Key=s3_key)
+            return True
+        except ClientError as error:
+            if error.response.get('Error', {}).get('Code') == '404':
+                return False
+            self.logger.error(f"Error checking {s3_key}: {error}")
+            return False
+        
 
 if __name__ == '__main__':
     import time
