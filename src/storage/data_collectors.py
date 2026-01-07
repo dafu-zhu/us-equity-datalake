@@ -4,16 +4,20 @@ Data collection functionality for market data.
 This module handles fetching market data from various sources:
 - Daily ticks from CRSP or Alpaca
 - Minute ticks from Alpaca API
+- Fundamental data from SEC EDGAR API
 """
 
 import datetime as dt
 import time
 import logging
-from typing import List, Dict
+from typing import List, Dict, Optional
+from pathlib import Path
+import yaml
 import requests
 import polars as pl
 
 from collection.models import TickField
+from collection.fundamental import Fundamental
 
 
 class DataCollectors:
@@ -49,11 +53,10 @@ class DataCollectors:
         :param year: Year to fetch data for
         :return: Polars DataFrame with columns: timestamp, open, high, low, close, volume
         """
-        all_months_data = []
-
         if year < 2025:
             # Use CRSP for years < 2025 (avoids survivorship bias)
             crsp_symbol = sym.replace('.', '').replace('-', '')
+            all_months_data = []
 
             # Fetch all 12 months
             for month in range(1, 13):
@@ -72,6 +75,12 @@ class DataCollectors:
                         continue
                     else:
                         raise
+
+            # Convert to Polars DataFrame
+            if not all_months_data:
+                return pl.DataFrame()
+
+            df = pl.DataFrame(all_months_data)
         else:
             # Use Alpaca for years >= 2025
             try:
@@ -80,30 +89,12 @@ class DataCollectors:
                     year=year,
                     adjusted=True
                 )
-
-                # Ensure correct column types and round decimals
-                if len(df) > 0:
-                    df = df.with_columns([
-                        pl.col('timestamp').cast(pl.Utf8),
-                        pl.col('open').round(4),
-                        pl.col('high').round(4),
-                        pl.col('low').round(4),
-                        pl.col('close').round(4),
-                        pl.col('volume').cast(pl.Int64)
-                    ]).sort('timestamp')
-
-                return df
             except Exception as e:
                 # Return empty DataFrame if fetch fails
+                self.logger.warning(f"Failed to fetch {sym} for {year}: {e}")
                 return pl.DataFrame()
 
-        # Convert to Polars DataFrame (for CRSP path)
-        if not all_months_data:
-            return pl.DataFrame()
-
-        df = pl.DataFrame(all_months_data)
-
-        # Ensure correct column types and round decimals
+        # Apply consistent formatting and rounding (single logic for both sources)
         if len(df) > 0:
             df = df.with_columns([
                 pl.col('timestamp').cast(pl.Utf8),
@@ -116,97 +107,7 @@ class DataCollectors:
 
         return df
 
-    def fetch_single_symbol_minute(
-        self,
-        symbol: str,
-        year: int,
-        month: int,
-        sleep_time: float = 0.1
-    ) -> List[dict]:
-        """
-        Fetch minute data for a single symbol for the specified month from Alpaca.
-
-        :param symbol: Symbol in Alpaca format (e.g., 'AAPL')
-        :param year: Year to fetch
-        :param month: Month to fetch (1-12)
-        :param sleep_time: Sleep time between requests in seconds (default: 0.1)
-        :return: List of bars
-        """
-        # Get month range
-        start_date = dt.date(year, month, 1)
-        if month == 12:
-            end_date = dt.date(year, 12, 31)
-        else:
-            end_date = dt.date(year, month + 1, 1) - dt.timedelta(days=1)
-
-        start_str = dt.datetime.combine(
-            start_date, dt.time(0, 0), tzinfo=dt.timezone.utc
-        ).isoformat().replace("+00:00", "Z")
-        end_str = dt.datetime.combine(
-            end_date, dt.time(23, 59, 59), tzinfo=dt.timezone.utc
-        ).isoformat().replace("+00:00", "Z")
-
-        # Prepare request
-        base_url = "https://data.alpaca.markets/v2/stocks/bars"
-
-        bars = []
-
-        params = {
-            "symbols": symbol,
-            "timeframe": "1Min",
-            "start": start_str,
-            "end": end_str,
-            "limit": 10000,
-            "adjustment": "raw",
-            "feed": "sip",
-            "sort": "asc"
-        }
-
-        session = requests.Session()
-        session.headers.update(self.alpaca_headers)
-
-        try:
-            # Initial request
-            response = session.get(base_url, params=params)
-            time.sleep(sleep_time)  # Rate limiting
-
-            if response.status_code != 200:
-                self.logger.error(
-                    f"Single fetch error for {symbol}: {response.status_code}, {response.text}"
-                )
-                return bars
-
-            data = response.json()
-            symbol_bars = data.get("bars", {}).get(symbol, [])
-            bars.extend(symbol_bars)
-
-            # Handle pagination
-            page_count = 1
-            while "next_page_token" in data and data["next_page_token"]:
-                params["page_token"] = data["next_page_token"]
-                response = session.get(base_url, params=params)
-                time.sleep(sleep_time)  # Rate limiting
-
-                if response.status_code != 200:
-                    self.logger.error(
-                        f"Pagination error on page {page_count} for {symbol}: {response.status_code}"
-                    )
-                    break
-
-                data = response.json()
-                symbol_bars = data.get("bars", {}).get(symbol, [])
-                bars.extend(symbol_bars)
-
-                page_count += 1
-
-            self.logger.info(f"Fetched {len(bars)} bars for {symbol} ({page_count} pages)")
-
-        except Exception as e:
-            self.logger.error(f"Exception during single fetch for {symbol}: {e}")
-
-        return bars
-
-    def fetch_minute_bulk(
+    def fetch_minute_month(
         self,
         symbols: List[str],
         year: int,
@@ -215,7 +116,7 @@ class DataCollectors:
     ) -> dict:
         """
         Bulk fetch minute data for multiple symbols for the specified month from Alpaca.
-        If bulk fetch fails, retry by fetching symbols one by one.
+        Delegates to alpaca_ticks for the actual API interaction.
 
         :param symbols: List of symbols in Alpaca format (e.g., ['AAPL', 'MSFT'])
         :param year: Year to fetch
@@ -223,154 +124,198 @@ class DataCollectors:
         :param sleep_time: Sleep time between requests in seconds (default: 0.2)
         :return: Dict mapping symbol -> list of bars
         """
-        # Get month range
-        start_date = dt.date(year, month, 1)
-        if month == 12:
-            end_date = dt.date(year, 12, 31)
-        else:
-            end_date = dt.date(year, month + 1, 1) - dt.timedelta(days=1)
+        return self.alpaca_ticks.fetch_minute_month_bulk(symbols, year, month, sleep_time)
 
-        start_str = dt.datetime.combine(
-            start_date, dt.time(0, 0), tzinfo=dt.timezone.utc
-        ).isoformat().replace("+00:00", "Z")
-        end_str = dt.datetime.combine(
-            end_date, dt.time(23, 59, 59), tzinfo=dt.timezone.utc
-        ).isoformat().replace("+00:00", "Z")
+    def fetch_minute_day(
+        self,
+        symbols: List[str],
+        trade_day: str,
+        sleep_time: float = 0.2
+    ) -> dict:
+        """
+        Fetch minute data for multiple symbols for a specific trading day from Alpaca.
+        Useful for daily incremental updates without refetching entire month.
 
-        # Prepare request
-        base_url = "https://data.alpaca.markets/v2/stocks/bars"
-        symbols_str = ",".join(symbols)
-        all_bars = {sym: [] for sym in symbols}
+        :param symbols: List of symbols in Alpaca format (e.g., ['AAPL', 'MSFT'])
+        :param trade_day: Trading day (format: "YYYY-MM-DD")
+        :param sleep_time: Sleep time between requests in seconds (default: 0.2)
+        :return: Dict mapping symbol -> list of bars
+        """
+        return self.alpaca_ticks.fetch_minute_day_bulk(symbols, trade_day, sleep_time)
 
-        params = {
-            "symbols": symbols_str,
-            "timeframe": "1Min",
-            "start": start_str,
-            "end": end_str,
-            "limit": 10000,
-            "adjustment": "raw",  # Raw prices for minute data
-            "feed": "sip",
-            "sort": "asc"
-        }
+    def parse_minute_bars_to_daily(
+        self,
+        symbol_bars: Dict[str, List],
+        trading_days: List[str]
+    ) -> Dict[tuple, pl.DataFrame]:
+        """
+        Parse minute bars organized by symbol into (symbol, day) tuples with DataFrames.
+        Uses vectorized operations for efficient processing.
 
-        # Retry logic for bulk fetch
-        max_retries = 3
-        bulk_success = False
+        :param symbol_bars: Dict mapping symbol -> list of bars (from fetch_minute_month)
+        :param trading_days: List of trading days in 'YYYY-MM-DD' format
+        :return: Dict mapping (symbol, day) -> DataFrame of minute data
+        """
+        result = {}
 
-        # Use persistent session to reuse TCP connections (avoids handshake overhead)
-        session = requests.Session()
-        session.headers.update(self.alpaca_headers)
+        for sym, bars in symbol_bars.items():
+            if not bars:
+                # No data for this symbol, mark all days as empty
+                for day in trading_days:
+                    result[(sym, day)] = pl.DataFrame()
+                continue
 
-        for retry in range(max_retries):
             try:
-                # Initial request (using session for connection reuse)
-                response = session.get(base_url, params=params)
-                time.sleep(sleep_time)  # Rate limiting
+                # Convert all bars to DataFrame at once using vectorized operations
+                timestamps = [bar[TickField.TIMESTAMP.value] for bar in bars]
+                opens = [bar[TickField.OPEN.value] for bar in bars]
+                highs = [bar[TickField.HIGH.value] for bar in bars]
+                lows = [bar[TickField.LOW.value] for bar in bars]
+                closes = [bar[TickField.CLOSE.value] for bar in bars]
+                volumes = [bar[TickField.VOLUME.value] for bar in bars]
+                num_trades_list = [bar[TickField.NUM_TRADES.value] for bar in bars]
+                vwaps = [bar[TickField.VWAP.value] for bar in bars]
 
-                if response.status_code == 429:
-                    # Rate limit error - use exponential backoff with longer waits
-                    wait_time = min(60, (2 ** retry) * 5)  # 5s, 10s, 20s (capped at 60s)
-                    self.logger.warning(
-                        f"Rate limit hit for bulk fetch (retry {retry + 1}/{max_retries}), "
-                        f"waiting {wait_time}s"
-                    )
-                    time.sleep(wait_time)
-                    continue
-                elif response.status_code != 200:
-                    self.logger.error(
-                        f"Bulk fetch error for {symbols}: {response.status_code}, {response.text}"
-                    )
-                    if retry < max_retries - 1:
-                        wait_time = (2 ** retry) * 2  # 2s, 4s, 8s
-                        self.logger.warning(f"Retrying after {wait_time}s...")
-                        time.sleep(wait_time)
-                        continue
-                    break
+                # Create DataFrame and process with vectorized operations
+                all_bars_df = pl.DataFrame({
+                    'timestamp_utc': timestamps,
+                    'open': opens,
+                    'high': highs,
+                    'low': lows,
+                    'close': closes,
+                    'volume': volumes,
+                    'num_trades': num_trades_list,
+                    'vwap': vwaps
+                }, strict=False).with_columns([
+                    # Parse timestamp: UTC -> ET, remove timezone
+                    # Use strptime with explicit format and timezone to handle 'Z' marker
+                    pl.col('timestamp_utc')
+                        .str.strptime(pl.Datetime('us', 'UTC'), format='%Y-%m-%dT%H:%M:%SZ')
+                        .dt.convert_time_zone('America/New_York')
+                        .dt.replace_time_zone(None)
+                        .alias('timestamp'),
+                    # Extract trade date for filtering by day (fast string slice)
+                    pl.col('timestamp_utc')
+                        .str.slice(0, 10)  # Just extract 'YYYY-MM-DD' from '2024-01-03T14:30:00Z'
+                        .alias('trade_date'),
+                    # Cast types (vectorized)
+                    pl.col('open').cast(pl.Float64),
+                    pl.col('high').cast(pl.Float64),
+                    pl.col('low').cast(pl.Float64),
+                    pl.col('close').cast(pl.Float64),
+                    pl.col('volume').cast(pl.Int64),
+                    pl.col('num_trades').cast(pl.Int64),
+                    pl.col('vwap').cast(pl.Float64)
+                ]).drop('timestamp_utc')
 
-                data = response.json()
-                bars = data.get("bars", {})
+                # Process each trading day by filtering
+                for day in trading_days:
+                    day_df = all_bars_df.filter(pl.col('trade_date') == day)
 
-                # Collect bars from initial response
-                for sym in symbols:
-                    if sym in bars:
-                        all_bars[sym].extend(bars[sym])
+                    if len(day_df) > 0:
+                        # Select final columns for upload
+                        minute_df = day_df.select([
+                            'timestamp', 'open', 'high', 'low', 'close',
+                            'volume', 'num_trades', 'vwap'
+                        ])
+                    else:
+                        # Empty DataFrame for days with no data
+                        minute_df = pl.DataFrame()
 
-                # Handle pagination
-                page_count = 1
-                while "next_page_token" in data and data["next_page_token"]:
-                    params["page_token"] = data["next_page_token"]
-                    response = session.get(base_url, params=params)
-                    time.sleep(sleep_time)  # Rate limiting
-
-                    if response.status_code == 429:
-                        # Rate limit during pagination - wait and retry this page
-                        wait_time = 5
-                        self.logger.error(
-                            f"Rate limit hit during pagination on page {page_count}, "
-                            f"waiting {wait_time}s"
-                        )
-                        time.sleep(wait_time)
-                        response = session.get(base_url, params=params)
-                        time.sleep(sleep_time)
-
-                    if response.status_code != 200:
-                        self.logger.error(
-                            f"Pagination error on page {page_count} for {symbols}: "
-                            f"{response.status_code}"
-                        )
-                        break
-
-                    data = response.json()
-                    bars = data.get("bars", {})
-
-                    for sym in symbols:
-                        if sym in bars:
-                            all_bars[sym].extend(bars[sym])
-
-                    page_count += 1
-
-                self.logger.info(
-                    f"Fetched {sum(len(v) for v in all_bars.values())} total bars for "
-                    f"{len(symbols)} symbols ({page_count} pages)"
-                )
-                bulk_success = True
-                break
+                    result[(sym, day)] = minute_df
 
             except Exception as e:
-                self.logger.error(
-                    f"Exception during bulk fetch for {symbols} "
-                    f"(retry {retry + 1}/{max_retries}): {e}"
-                )
-                if retry < max_retries - 1:
-                    wait_time = (2 ** retry) * 2
-                    self.logger.error(f"Retrying after {wait_time}s...")
-                    time.sleep(wait_time)
+                self.logger.error(f"Error processing bars for {sym}: {e}", exc_info=True)
+                # Mark all days as empty for this symbol
+                for day in trading_days:
+                    result[(sym, day)] = pl.DataFrame()
 
-        # Close the session after retry loop
-        session.close()
+        return result
 
-        # If bulk fetch failed after retries, fetch symbols one by one
-        if not bulk_success:
-            self.logger.info(
-                f"Bulk fetch failed after {max_retries} retries, "
-                f"fetching symbols individually"
-            )
-            failed_symbols = []
+    def collect_fundamental_year(
+        self,
+        cik: str,
+        year: int,
+        symbol: Optional[str] = None,
+        concepts: Optional[List[str]] = None,
+        config_path: Optional[Path] = None
+    ) -> pl.DataFrame:
+        """
+        Fetch fundamental data for a specific year using approved_mapping.yaml concepts.
+        Returns only actual filing dates (quarterly data points) without forward-filling.
 
-            for sym in symbols:
+        :param cik: Company CIK number
+        :param year: Year to fetch data for
+        :param symbol: Optional symbol for logging (e.g., 'AAPL')
+        :param concepts: Optional list of concepts to fetch. If None, fetches all concepts from config.
+        :param config_path: Optional path to approved_mapping.yaml (defaults to configs/approved_mapping.yaml)
+        :return: Polars DataFrame with columns [timestamp, concept1, concept2, ...]
+                 Returns empty DataFrame if no data available or error occurs
+
+        Example:
+            >>> collector = DataCollectors(...)
+            >>> df = collector.collect_fundamental_year(cik='0001819994', year=2024, symbol='RKLB')
+            >>> # Returns DataFrame with columns: timestamp, rev, net_inc, ta, tl, te, etc.
+        """
+        try:
+            # Load concept mappings if not provided
+            if concepts is None:
+                if config_path is None:
+                    config_path = Path("configs/approved_mapping.yaml")
+
+                with open(config_path) as f:
+                    mappings = yaml.safe_load(f)
+                    concepts = list(mappings.keys())
+                    self.logger.debug(f"Loaded {len(concepts)} concepts from {config_path}")
+
+            # Create Fundamental instance
+            fund = Fundamental(cik=cik, symbol=symbol)
+
+            # Collect data for each concept
+            fields_dict = {}
+            concepts_found = []
+            concepts_missing = []
+
+            for concept in concepts:
                 try:
-                    bars = self.fetch_single_symbol_minute(sym, year, month, sleep_time=sleep_time)
-                    all_bars[sym] = bars
-                    if not bars:
-                        self.logger.info(f"No data returned for {sym}")
+                    dps = fund.get_concept_data(concept)
+                    if dps:
+                        fields_dict[concept] = fund.get_value_tuple(dps)
+                        concepts_found.append(concept)
+                    else:
+                        # Add missing concept with empty list to ensure column exists with null values
+                        fields_dict[concept] = []
+                        concepts_missing.append(concept)
                 except Exception as e:
-                    self.logger.error(f"Failed to fetch {sym} individually: {e}")
-                    failed_symbols.append(sym)
+                    self.logger.debug(f"Failed to extract concept '{concept}' for CIK {cik}: {e}")
+                    # Add failed concept with empty list to ensure column exists with null values
+                    fields_dict[concept] = []
+                    concepts_missing.append(concept)
 
-            if failed_symbols:
-                self.logger.warning(
-                    f"Failed to fetch {len(failed_symbols)} symbols even after "
-                    f"individual retry: {failed_symbols}"
+            # If no data found for any concept, return empty DataFrame
+            if not concepts_found:
+                self.logger.warning(f"No fundamental data found for CIK {cik} ({symbol}) in {year}")
+                return pl.DataFrame()
+
+            # Log coverage statistics
+            self.logger.debug(
+                f"CIK {cik} ({symbol}): {len(concepts_found)}/{len(concepts)} concepts available "
+                f"({len(concepts_missing)} missing)"
+            )
+
+            # Aggregate data for the year (no forward-filling)
+            start_day = f"{year}-01-01"
+            end_day = f"{year}-12-31"
+            df = fund.collect_fields_raw(start_day, end_day, fields_dict)
+
+            # Convert timestamp to string for consistency
+            if len(df) > 0 and 'timestamp' in df.columns:
+                df = df.with_columns(
+                    pl.col('timestamp').dt.strftime('%Y-%m-%d')
                 )
 
-        return all_bars
+            return df
+
+        except Exception as e:
+            self.logger.error(f"Failed to collect fundamental data for CIK {cik} ({symbol}) in {year}: {e}")
+            return pl.DataFrame()

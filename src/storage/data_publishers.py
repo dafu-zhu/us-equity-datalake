@@ -13,9 +13,12 @@ import datetime as dt
 import logging
 import queue
 import threading
-from typing import Dict, List, Optional, Callable
+from pathlib import Path
+from typing import Dict, List, Optional, Callable, Any, cast
 import requests
 import polars as pl
+import yaml
+from boto3.s3.transfer import TransferConfig
 
 from collection.fundamental import Fundamental
 
@@ -27,17 +30,66 @@ class DataPublishers:
 
     def __init__(
         self,
-        upload_fileobj_func: Callable,
+        s3_client,
+        upload_config,
         logger: logging.Logger
     ):
         """
         Initialize data publishers.
 
-        :param upload_fileobj_func: Function to upload file objects to S3
+        :param s3_client: Boto3 S3 client instance
+        :param upload_config: UploadConfig instance with transfer settings
         :param logger: Logger instance
         """
-        self.upload_fileobj = upload_fileobj_func
+        self.s3_client = s3_client
+        self.upload_config = upload_config
         self.logger = logger
+
+    def upload_fileobj(
+        self,
+        data: io.BytesIO,
+        key: str,
+        metadata: Optional[Dict[str, str]] = None
+    ) -> None:
+        """Upload file object to S3 with proper configuration"""
+
+        # Define transfer config
+        cfg = cast(Dict[str, Any], self.upload_config.transfer or {})
+        transfer_config = TransferConfig(
+            multipart_threshold=int(cfg.get('multipart_threshold', 10485760)),
+            max_concurrency=int(cfg.get('max_concurrency', 5)),
+            multipart_chunksize=int(cfg.get('multipart_chunksize', 10485760)),
+            num_download_attempts=int(cfg.get('num_download_attempts', 5)),
+            max_io_queue=int(cfg.get('max_io_queue', 100)),
+            io_chunksize=int(cfg.get('io_chunksize', 262144)),
+            use_threads=(str(cfg.get('use_threads', True)).lower() == "true")
+        )
+
+        # Determine content type
+        content_type_map = {
+            '.parquet': 'application/x-parquet',
+            '.json': 'application/json',
+            '.csv': 'text/csv'
+        }
+        file_ext = Path(key).suffix
+        content_type = content_type_map.get(file_ext, 'application/octet-stream')
+
+        # Build ExtraArgs
+        extra_args = {
+            'ContentType': content_type,
+            'ServerSideEncryption': 'AES256',
+            'StorageClass': 'INTELLIGENT_TIERING',
+            'Metadata': metadata or {}
+        }
+
+        # Upload
+        self.s3_client.upload_fileobj(
+            Fileobj=data,
+            Bucket='us-equity-datalake',
+            Key=key,
+            Config=transfer_config,
+            ExtraArgs=extra_args
+        )
 
     def publish_daily_ticks(
         self,
@@ -182,28 +234,29 @@ class DataPublishers:
         sym: str,
         year: int,
         cik: Optional[str],
-        dei_fields: List[str],
-        gaap_fields: List[str],
-        sec_rate_limiter
+        sec_rate_limiter,
+        concepts: Optional[List[str]] = None,
+        config_path: Optional[Path] = None
     ) -> Dict[str, Optional[str]]:
         """
         Publish fundamental data for a single symbol for an entire year to S3.
+        Uses concept-based extraction with approved_mapping.yaml.
         Returns dict with status for progress tracking.
 
         Storage: data/raw/fundamental/{symbol}/{YYYY}/fundamental.parquet
         Contains all quarterly/annual filings for the year (no forward fill).
 
-        :param sym: Symbol in SEC format
+        :param sym: Symbol in Alpaca format (e.g., 'BRK.B') - used for storage path
         :param year: Year to fetch data for
         :param cik: CIK string (or None to skip)
-        :param dei_fields: DEI fields to collect
-        :param gaap_fields: US-GAAP fields to collect
         :param sec_rate_limiter: Rate limiter for SEC API
+        :param concepts: Optional list of concepts to fetch. If None, fetches all from config.
+        :param config_path: Optional path to approved_mapping.yaml
         :return: Dict with status info
         """
         try:
             if cik is None:
-                self.logger.warning(f'Skipping {sym}: No CIK found (should have been filtered earlier)')
+                self.logger.warning(f'Skipping {sym}: No CIK found')
                 return {
                     'symbol': sym,
                     'status': 'skipped',
@@ -214,29 +267,55 @@ class DataPublishers:
             # Rate limit before making SEC API request
             sec_rate_limiter.acquire()
 
-            # Fetch from SEC EDGAR API
-            fnd = Fundamental(cik, sym)
+            # Load concept mappings if not provided
+            if concepts is None:
+                if config_path is None:
+                    config_path = Path("configs/approved_mapping.yaml")
 
-            # Build fields_dict using new API
+                with open(config_path) as f:
+                    mappings = yaml.safe_load(f)
+                    concepts = list(mappings.keys())
+                    self.logger.debug(f"Loaded {len(concepts)} concepts from {config_path}")
+
+            # Fetch from SEC EDGAR API using concept-based extraction
+            fnd = Fundamental(cik=cik, symbol=sym)
+
+            # Collect data for each concept
             fields_dict = {}
+            concepts_found = []
+            concepts_missing = []
 
-            # Collect DEI fields
-            for field in dei_fields:
+            for concept in concepts:
                 try:
-                    dps = fnd.get_dps(field, 'dei')
-                    fields_dict[field] = fnd.get_value_tuple(dps)
-                except KeyError:
-                    # Field not available for this company
-                    fields_dict[field] = []
+                    dps = fnd.get_concept_data(concept)
+                    if dps:
+                        fields_dict[concept] = fnd.get_value_tuple(dps)
+                        concepts_found.append(concept)
+                    else:
+                        # Add missing concept with empty list to ensure column exists with null values
+                        fields_dict[concept] = []
+                        concepts_missing.append(concept)
+                except Exception as e:
+                    self.logger.debug(f"Failed to extract concept '{concept}' for {sym} (CIK {cik}): {e}")
+                    # Add failed concept with empty list to ensure column exists with null values
+                    fields_dict[concept] = []
+                    concepts_missing.append(concept)
 
-            # Collect US-GAAP fields
-            for field in gaap_fields:
-                try:
-                    dps = fnd.get_dps(field, 'us-gaap')
-                    fields_dict[field] = fnd.get_value_tuple(dps)
-                except KeyError:
-                    # Field not available for this company
-                    fields_dict[field] = []
+            # If no data found for any concept, return skipped
+            if not fields_dict:
+                self.logger.warning(f'No fundamental data found for {sym} (CIK {cik}) in {year}')
+                return {
+                    'symbol': sym,
+                    'status': 'skipped',
+                    'error': f'No fundamental data available for {sym} in {year}',
+                    'cik': cik
+                }
+
+            # Log coverage statistics
+            self.logger.debug(
+                f"{sym} (CIK {cik}): {len(concepts_found)}/{len(concepts)} concepts available "
+                f"({len(concepts_missing)} missing)"
+            )
 
             # Define date range for the ENTIRE YEAR
             start_day = f"{year}-01-01"
@@ -245,10 +324,15 @@ class DataPublishers:
             # Collect fields into DataFrame (only actual quarterly filings, no forward-fill)
             combined_df = fnd.collect_fields_raw(start_day, end_day, fields_dict)
 
+            # Convert timestamp to string for consistency
+            if len(combined_df) > 0 and 'timestamp' in combined_df.columns:
+                combined_df = combined_df.with_columns(
+                    pl.col('timestamp').dt.strftime('%Y-%m-%d')
+                )
+
             # Check if DataFrame is empty
             if len(combined_df) == 0:
-                cik_str = f" (CIK {cik})" if cik else ""
-                self.logger.info(f'No fundamental data for {sym}{cik_str} in {year} - likely no filings this year')
+                self.logger.info(f'No fundamental data for {sym} (CIK {cik}) in {year} - likely no filings this year')
                 return {
                     'symbol': sym,
                     'status': 'skipped',
@@ -263,12 +347,15 @@ class DataPublishers:
 
             s3_data = buffer
             # Year-based storage: data/raw/fundamental/{symbol}/{YYYY}/fundamental.parquet
+            # Use Alpaca format symbol (e.g., 'BRK.B') for consistency with ticks storage
             s3_key = f"data/raw/fundamental/{sym}/{year}/fundamental.parquet"
             s3_metadata = {
                 'symbol': sym,
                 'year': str(year),
                 'data_type': 'fundamental',
-                'quarters': str(len(combined_df))  # Track number of quarters
+                'quarters': str(len(combined_df)),
+                'concepts_found': str(len(concepts_found)),
+                'concepts_total': str(len(concepts))
             }
             # Allow list or dict as metadata value
             s3_metadata_prepared = {
@@ -279,17 +366,17 @@ class DataPublishers:
             # Publish onto AWS S3
             self.upload_fileobj(s3_data, s3_key, s3_metadata_prepared)
 
-            return {'symbol': sym, 'status': 'success', 'error': None}
+            return {'symbol': sym, 'status': 'success', 'error': None, 'cik': cik}
 
         except requests.RequestException as e:
             cik_str = f" (CIK {cik})" if cik else ""
             self.logger.warning(f'Failed to fetch data for {sym}{cik_str}: {e}')
-            return {'symbol': sym, 'status': 'failed', 'error': str(e)}
+            return {'symbol': sym, 'status': 'failed', 'error': str(e), 'cik': cik}
         except ValueError as e:
             cik_str = f" (CIK {cik})" if cik else ""
             self.logger.error(f'Invalid data for {sym}{cik_str}: {e}')
-            return {'symbol': sym, 'status': 'failed', 'error': str(e)}
+            return {'symbol': sym, 'status': 'failed', 'error': str(e), 'cik': cik}
         except Exception as e:
             cik_str = f" (CIK {cik})" if cik else ""
             self.logger.error(f'Unexpected error for {sym}{cik_str}: {e}', exc_info=True)
-            return {'symbol': sym, 'status': 'failed', 'error': str(e)}
+            return {'symbol': sym, 'status': 'failed', 'error': str(e), 'cik': cik}
