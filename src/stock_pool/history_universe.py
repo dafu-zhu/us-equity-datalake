@@ -10,7 +10,7 @@ from master.security_master import SymbolNormalizer, SecurityMaster
 load_dotenv()
 
 
-def get_hist_universe_crsp(year: int, db: Optional[wrds.Connection] = None) -> pl.DataFrame:
+def get_hist_universe_crsp(year: int, month: int, db: Optional[wrds.Connection] = None) -> pl.DataFrame:
     """
     Historical universe common stock list from CRSP database for a given year.
     Queries CRSP directly using year-end "as of" date to get all active stocks.
@@ -18,10 +18,9 @@ def get_hist_universe_crsp(year: int, db: Optional[wrds.Connection] = None) -> p
     Ticker name has no '-' or '.', e.g. BRK.B in alpaca, BRK-B in SEC, BRKB in CRSP
 
     :param year: Year (e.g., 2024)
+    :param month: Month (e.g., 12)
     :param db: Optional WRDS connection (creates new one if not provided)
     :return: DataFrame with columns: Ticker (CRSP format), Name, PERMNO
-
-    Note: Returns all stocks that were active on the last trading day of the year
     """
     # Create WRDS connection if not provided
     close_db = False
@@ -32,8 +31,8 @@ def get_hist_universe_crsp(year: int, db: Optional[wrds.Connection] = None) -> p
         close_db = True
 
     try:
-        # Use year-end as "as of" date
-        asof = f"{year}-12-31"
+        # Use end-of-month as "as of" date
+        asof = f"{year}-{month:02d}-28"
 
         sql = f"""
         SELECT DISTINCT
@@ -83,12 +82,14 @@ def get_hist_universe_nasdaq(
     :param db: Optional WRDS connection (for performance when calling multiple times)
     :return: DataFrame with columns: Ticker (Nasdaq format), Name, PERMNO
 
+    Note: Returns all stocks that were active on the last trading day of the year
+
     Example:
         get_hist_universe_nasdaq(2022)
         # Returns: BRK.B, AAPL, GOOGL, etc. (Nasdaq format)
     """
     # Get historical universe in CRSP format
-    crsp_df = get_hist_universe_crsp(year, db=db)
+    crsp_df = get_hist_universe_crsp(year, month=12, db=db)
     crsp_symbols = crsp_df['Ticker'].to_list()
 
     # Initialize normalizer with optional SecurityMaster validation
@@ -107,7 +108,7 @@ def get_hist_universe_nasdaq(
 
     # Convert to Nasdaq format with validation
     # Use July 1st of the year as reference date for validation
-    reference_day = f"{year}-07-01" if with_validation else None
+    reference_day = f"{year}-12-31" if with_validation else None
     nasdaq_symbols = normalizer.batch_normalize(crsp_symbols, day=reference_day)
 
     # Close SecurityMaster connection only if we created it
@@ -131,7 +132,7 @@ if __name__ == "__main__":
     print(f"Example 1: Historical Universe - CRSP Format ({year})")
     print("=" * 70)
 
-    crsp_df = get_hist_universe_crsp(year)
+    crsp_df = get_hist_universe_crsp(year, 2)
     crsp_symbols = crsp_df['Ticker'].to_list()
     print(f"\nTotal symbols (CRSP format): {len(crsp_symbols)}")
     print(f"First 10 symbols: {crsp_symbols[:10]}")

@@ -50,18 +50,6 @@ class UniverseManager:
         # Cache the result
         self._current_symbols_cache = symbols
         return symbols
-    
-    def get_hist_symbols(self, day: str) -> list[str]:
-        """
-        Get history common stock list from CRSP database
-        """
-        symbols_df = get_hist_universe_nasdaq(day, security_master=self.security_master)
-        symbols = symbols_df['Ticker'].to_list()
-
-        if len(symbols) == 0:
-            self.logger.warning(f"No symbols fetched for day {day}")
-
-        return symbols
 
     def load_symbols_for_year(self, year: int, sym_type: str = "alpaca") -> list[str]:
         """
@@ -105,13 +93,20 @@ class UniverseManager:
             self.logger.error(f"Failed to load symbols for {year}: {e}", exc_info=True)
             return []
 
-    def get_top_3000(self, day: str, symbols: list[str], source: str) -> list[str]:
+    def get_top_3000(
+        self,
+        day: str,
+        symbols: list[str],
+        source: str,
+        auto_resolve: bool = True
+    ) -> list[str]:
         """
         Fetch recent data and calculate top 3000 most liquid stocks (in-memory).
 
         :param day: Date string in format "YYYY-MM-DD"
         :param symbols: List of symbols to analyze
         :param source: 'crsp' or 'alpaca'
+        :param auto_resolve: If True, resolve symbol changes when using CRSP
         :return: List of top 3000 symbols ranked by average dollar volume
         """
         self.logger.info(f"Fetching recent data on {day} for {len(symbols)} symbols using {source}...")
@@ -119,7 +114,11 @@ class UniverseManager:
         # Fetch recent data (returns Dict[str, pl.DataFrame])
         # Use pre-initialized fetchers to avoid reconnecting to databases
         if source.lower() == 'crsp':
-            recent_data = self.crsp_fetcher.recent_daily_ticks(symbols, end_day=day)
+            recent_data = self.crsp_fetcher.recent_daily_ticks(
+                symbols,
+                end_day=day,
+                auto_resolve=auto_resolve
+            )
         elif source.lower() == 'alpaca':
             recent_data = self.alpaca_fetcher.recent_daily_ticks(symbols, end_day=day)
         else:
@@ -183,7 +182,7 @@ if __name__ == "__main__":
     print("-" * 70)
 
     if year < 2025:
-        all_symbols = um.get_hist_symbols(day)
+        all_symbols = um.load_symbols_for_year(year)
         print(f"Historical universe loaded: {len(all_symbols)} symbols")
     else:
         all_symbols = um.get_current_symbols(refresh=False)
