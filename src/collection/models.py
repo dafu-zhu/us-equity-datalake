@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from abc import ABC, abstractmethod
+from typing import Optional, List
 import datetime
 from typing import Dict
 from enum import Enum
@@ -32,3 +34,21 @@ class TickField(Enum):
     TIMESTAMP = 't'
     VOLUME = 'v'
     VWAP = 'vw'
+
+class DataSource(ABC):
+    """Abstract base class for fundamental data sources"""
+
+    @abstractmethod
+    def supports_concept(self, concept: str) -> bool:
+        """Check if this data source can provide the concept"""
+        pass
+
+    @abstractmethod
+    def extract_concept(self, concept: str) -> Optional[List[FndDataPoint]]:
+        """Extract data points for the concept"""
+        pass
+
+    @abstractmethod
+    def get_coverage_period(self) -> tuple[str, str]:
+        """Return (start_date, end_date) of coverage"""
+        pass

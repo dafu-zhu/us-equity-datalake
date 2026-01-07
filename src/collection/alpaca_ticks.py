@@ -225,15 +225,338 @@ class Ticks:
             self.logger.error(f"Request failed for {symbol}: {e}")
             return []
 
-    def get_minute(self, symbol, trade_day: str) -> List[Dict[str, Any]]:
+    def _get_month_range(self, year: int, month: int) -> tuple[str, str]:
         """
-        Get minute-level OHLCV data for a specific trading day.
+        Calculate UTC time range for a given month.
 
-        :param trade_day: Trading day (format: "YYYY-MM-DD" or date object)
-        :return: List of dictionaries with OHLCV data
+        :param year: Year
+        :param month: Month (1-12)
+        :return: Tuple of (start_str, end_str) in ISO format with 'Z' suffix
         """
-        start, end = self.get_trade_day_range(trade_day)
-        return self.get_ticks(symbol, start, end, "1Min")
+        start_date = dt.date(year, month, 1)
+        if month == 12:
+            end_date = dt.date(year, 12, 31)
+        else:
+            end_date = dt.date(year, month + 1, 1) - dt.timedelta(days=1)
+
+        start_str = dt.datetime.combine(
+            start_date, dt.time(0, 0), tzinfo=dt.timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+        end_str = dt.datetime.combine(
+            end_date, dt.time(23, 59, 59), tzinfo=dt.timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+
+        return start_str, end_str
+
+    def _fetch_with_pagination(
+        self,
+        session: requests.Session,
+        base_url: str,
+        params: dict,
+        symbols: List[str],
+        sleep_time: float
+    ) -> dict:
+        """
+        Fetch data with pagination handling from Alpaca API.
+
+        :param session: Requests session with headers configured
+        :param base_url: API endpoint URL
+        :param params: Initial request parameters
+        :param symbols: List of symbols being fetched
+        :param sleep_time: Sleep time between requests
+        :return: Dict mapping symbol -> list of bars
+        """
+        all_bars = {sym: [] for sym in symbols}
+        page_count = 0
+
+        while True:
+            page_count += 1
+            response = session.get(base_url, params=params)
+            time.sleep(sleep_time)
+
+            if response.status_code != 200:
+                self.logger.error(
+                    f"API error (page {page_count}): {response.status_code}, {response.text}"
+                )
+                break
+
+            data = response.json()
+            bars = data.get("bars", {})
+
+            for sym in symbols:
+                if sym in bars:
+                    all_bars[sym].extend(bars[sym])
+
+            # Check for next page
+            next_token = data.get("next_page_token")
+            if not next_token:
+                self.logger.info(
+                    f"Fetched {sum(len(v) for v in all_bars.values())} total bars "
+                    f"for {len(symbols)} symbols ({page_count} pages)"
+                )
+                break
+
+            params["page_token"] = next_token
+
+        return all_bars
+
+    def _fetch_minute_bulk_with_retry(
+        self,
+        symbols: List[str],
+        start_str: str,
+        end_str: str,
+        period_desc: str,
+        sleep_time: float = 0.2
+    ) -> dict:
+        """
+        Generic method to fetch minute data with retry and pagination logic.
+
+        :param symbols: List of symbols in Alpaca format
+        :param start_str: Start time in UTC ISO format with 'Z' suffix
+        :param end_str: End time in UTC ISO format with 'Z' suffix
+        :param period_desc: Description for logging (e.g., "2024-12" or "2024-12-31")
+        :param sleep_time: Sleep time between requests in seconds
+        :return: Dict mapping symbol -> list of bars
+        """
+        params = {
+            "symbols": ",".join(symbols),
+            "timeframe": "1Min",
+            "start": start_str,
+            "end": end_str,
+            "limit": 10000,
+            "adjustment": "raw",
+            "feed": "sip",
+            "sort": "asc"
+        }
+
+        max_retries = 3
+        all_bars = {sym: [] for sym in symbols}
+        session = requests.Session()
+        session.headers.update(self.headers)
+
+        for retry in range(max_retries):
+            try:
+                base_url = "https://data.alpaca.markets/v2/stocks/bars"
+
+                # Reset page_token for retries
+                if "page_token" in params:
+                    del params["page_token"]
+
+                # Initial request
+                response = session.get(base_url, params=params)
+                time.sleep(sleep_time)
+
+                if response.status_code == 429:
+                    wait_time = min(60, (2 ** retry) * 5)  # 5s, 10s, 20s (capped at 60s)
+                    self.logger.warning(
+                        f"Rate limit hit for {period_desc} (retry {retry + 1}/{max_retries}), "
+                        f"waiting {wait_time}s"
+                    )
+                    time.sleep(wait_time)
+                    continue
+                elif response.status_code != 200:
+                    self.logger.error(
+                        f"Fetch error for {period_desc}: {response.status_code}, {response.text}"
+                    )
+                    if retry < max_retries - 1:
+                        wait_time = (2 ** retry) * 2  # 2s, 4s, 8s
+                        self.logger.warning(f"Retrying after {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+                    break
+
+                data = response.json()
+                bars = data.get("bars", {})
+
+                # Collect initial bars
+                for sym in symbols:
+                    if sym in bars:
+                        all_bars[sym].extend(bars[sym])
+
+                # Handle pagination with rate limit retry
+                page_count = 1
+                next_token = data.get("next_page_token")
+
+                while next_token:
+                    page_count += 1
+                    params["page_token"] = next_token
+                    response = session.get(base_url, params=params)
+                    time.sleep(sleep_time)
+
+                    if response.status_code == 429:
+                        wait_time = 5
+                        self.logger.warning(
+                            f"Rate limit hit during pagination on page {page_count}, "
+                            f"waiting {wait_time}s"
+                        )
+                        time.sleep(wait_time)
+                        response = session.get(base_url, params=params)
+                        time.sleep(sleep_time)
+
+                    if response.status_code != 200:
+                        self.logger.error(
+                            f"Pagination error on page {page_count} for {period_desc}: "
+                            f"{response.status_code}"
+                        )
+                        break
+
+                    data = response.json()
+                    bars = data.get("bars", {})
+
+                    for sym in symbols:
+                        if sym in bars:
+                            all_bars[sym].extend(bars[sym])
+
+                    next_token = data.get("next_page_token")
+
+                self.logger.info(
+                    f"Fetched {sum(len(v) for v in all_bars.values())} total bars for "
+                    f"{len(symbols)} symbols for {period_desc} ({page_count} pages)"
+                )
+                break
+
+            except Exception as e:
+                self.logger.error(
+                    f"Exception during fetch for {period_desc} "
+                    f"(retry {retry + 1}/{max_retries}): {e}"
+                )
+                if retry < max_retries - 1:
+                    wait_time = (2 ** retry) * 2
+                    self.logger.warning(f"Retrying after {wait_time}s...")
+                    time.sleep(wait_time)
+
+        session.close()
+        return all_bars
+
+    def fetch_minute_day_bulk(
+        self,
+        symbols: List[str],
+        trade_day: str,
+        sleep_time: float = 0.2
+    ) -> dict:
+        """
+        Bulk fetch minute data for multiple symbols for a specific trading day.
+        Useful for daily incremental updates without refetching entire month.
+
+        :param symbols: List of symbols in Alpaca format (e.g., ['AAPL', 'MSFT'])
+        :param trade_day: Trading day (format: "YYYY-MM-DD")
+        :param sleep_time: Sleep time between requests in seconds (default: 0.2)
+        :return: Dict mapping symbol -> list of bars
+        """
+        start_str, end_str = self.get_trade_day_range(trade_day)
+        return self._fetch_minute_bulk_with_retry(
+            symbols=symbols,
+            start_str=start_str,
+            end_str=end_str,
+            period_desc=trade_day,
+            sleep_time=sleep_time
+        )
+
+    def fetch_minute_month_single(
+        self,
+        symbol: str,
+        year: int,
+        month: int,
+        sleep_time: float = 0.1
+    ) -> List[dict]:
+        """
+        Fetch minute data for a single symbol for the specified month.
+
+        :param symbol: Symbol in Alpaca format (e.g., 'AAPL')
+        :param year: Year to fetch
+        :param month: Month to fetch (1-12)
+        :param sleep_time: Sleep time between requests in seconds (default: 0.1)
+        :return: List of bars
+        """
+        start_str, end_str = self._get_month_range(year, month)
+
+        params = {
+            "symbols": symbol,
+            "timeframe": "1Min",
+            "start": start_str,
+            "end": end_str,
+            "limit": 10000,
+            "adjustment": "raw",
+            "feed": "sip",
+            "sort": "asc"
+        }
+
+        session = requests.Session()
+        session.headers.update(self.headers)
+
+        try:
+            base_url = "https://data.alpaca.markets/v2/stocks/bars"
+            result = self._fetch_with_pagination(
+                session=session,
+                base_url=base_url,
+                params=params,
+                symbols=[symbol],
+                sleep_time=sleep_time
+            )
+            return result.get(symbol, [])
+
+        except Exception as e:
+            self.logger.error(f"Exception during single fetch for {symbol}: {e}")
+            return []
+        finally:
+            session.close()
+
+    def fetch_minute_month_bulk(
+        self,
+        symbols: List[str],
+        year: int,
+        month: int,
+        sleep_time: float = 0.2
+    ) -> dict:
+        """
+        Bulk fetch minute data for multiple symbols for the specified month.
+        If bulk fetch fails, retry by fetching symbols one by one.
+
+        :param symbols: List of symbols in Alpaca format (e.g., ['AAPL', 'MSFT'])
+        :param year: Year to fetch
+        :param month: Month to fetch (1-12)
+        :param sleep_time: Sleep time between requests in seconds (default: 0.2)
+        :return: Dict mapping symbol -> list of bars
+        """
+        start_str, end_str = self._get_month_range(year, month)
+        period_desc = f"{year}-{month:02d}"
+
+        # Try bulk fetch with retry logic
+        all_bars = self._fetch_minute_bulk_with_retry(
+            symbols=symbols,
+            start_str=start_str,
+            end_str=end_str,
+            period_desc=period_desc,
+            sleep_time=sleep_time
+        )
+
+        # Check if bulk fetch succeeded (at least some data returned)
+        bulk_success = any(len(bars) > 0 for bars in all_bars.values())
+
+        # If bulk fetch failed completely, fetch symbols one by one
+        if not bulk_success:
+            self.logger.info(
+                f"Bulk fetch returned no data, fetching symbols individually"
+            )
+            failed_symbols = []
+
+            for sym in symbols:
+                try:
+                    bars = self.fetch_minute_month_single(sym, year, month, sleep_time=sleep_time)
+                    all_bars[sym] = bars
+                    if not bars:
+                        self.logger.info(f"No data returned for {sym}")
+                except Exception as e:
+                    self.logger.error(f"Failed to fetch {sym} individually: {e}")
+                    failed_symbols.append(sym)
+
+            if failed_symbols:
+                self.logger.warning(
+                    f"Failed to fetch {len(failed_symbols)} symbols even after "
+                    f"individual retry: {failed_symbols}"
+                )
+
+        return all_bars
 
     def get_daily(self, symbol: str, year: int, month: int, adjusted: bool=True) -> List[Dict[str, Any]]:
         """
@@ -376,58 +699,6 @@ class Ticks:
 
         return result
     
-    def collect_minute_ticks(self, symbol: str, trade_day: str) -> pl.DataFrame:
-        """
-        Given a trade day, collect the minute level tick data with dataframe
-
-        :param symbol: Stock symbol
-        :param trade_day: In format 'YYYY-MM-DD'
-        :return: Polars DataFrame with minute-level OHLCV data
-        """
-        ticks = self.get_minute(symbol=symbol, trade_day=trade_day)
-        parsed_ticks: List[TickDataPoint] = self.parse_ticks(ticks)
-
-        # Convert datapoints to dictionaries
-        ticks_data = [asdict(dp) for dp in parsed_ticks]
-
-        # Handle empty data case
-        if not ticks_data:
-            self.logger.warning(f"No data available for {symbol} on {trade_day}")
-            # Return empty DataFrame with correct schema
-            df = pl.DataFrame({
-                'timestamp': [],
-                'open': [],
-                'high': [],
-                'low': [],
-                'close': [],
-                'volume': [],
-                'num_trades': [],
-                'vwap': []
-            }).with_columns([
-                pl.col('timestamp').cast(pl.Datetime),
-                pl.col('open').cast(pl.Float64),
-                pl.col('high').cast(pl.Float64),
-                pl.col('low').cast(pl.Float64),
-                pl.col('close').cast(pl.Float64),
-                pl.col('volume').cast(pl.Int64),
-                pl.col('num_trades').cast(pl.Int64),
-                pl.col('vwap').cast(pl.Float64)
-            ])
-            return df
-
-        # Create DataFrame with appropriate schema based on storage type
-        df = pl.DataFrame(ticks_data).with_columns([
-            pl.col('timestamp').str.to_datetime(format='%Y-%m-%dT%H:%M:%S'),
-            pl.col('open').cast(pl.Float64),
-            pl.col('high').cast(pl.Float64),
-            pl.col('low').cast(pl.Float64),
-            pl.col('close').cast(pl.Float64),
-            pl.col('volume').cast(pl.Int64),
-            pl.col('num_trades').cast(pl.Int64),
-            pl.col('vwap').cast(pl.Float64)
-        ])
-
-        return df
 
 
 
@@ -467,19 +738,37 @@ if __name__ == "__main__":
     print("\nFirst 3 records:")
     print(daily_ticks[:3])
 
-    # Example 3: Fetch minute ticks for a specific day (returns DataFrame)
+    # Example 3: Bulk fetch minute ticks for multiple symbols for a month
     print("\n" + "=" * 70)
-    print("Example 3: collect_minute_ticks")
+    print("Example 3: fetch_minute_month_bulk")
     print("=" * 70)
 
-    symbol = "AAPL"
+    symbols = ["AAPL", "MSFT"]
+    year = 2024
+    month = 12
+
+    print(f"Fetching minute data for {len(symbols)} symbols for {year}-{month:02d}...")
+    minute_data = ticks.fetch_minute_month_bulk(symbols=symbols, year=year, month=month)
+
+    for sym, bars in minute_data.items():
+        print(f"\n{sym}: {len(bars)} minute bars")
+        if bars:
+            print(f"First bar: {bars[0]}")
+            print(f"Last bar: {bars[-1]}")
+
+    # Example 4: Bulk fetch minute ticks for a single day (for daily updates)
+    print("\n" + "=" * 70)
+    print("Example 4: fetch_minute_day_bulk")
+    print("=" * 70)
+
+    symbols = ["AAPL", "MSFT", "GOOGL"]
     trade_day = "2024-12-31"
 
-    print(f"Fetching minute ticks for {symbol} on {trade_day}...")
-    minute_df = ticks.collect_minute_ticks(symbol=symbol, trade_day=trade_day)
+    print(f"Fetching minute data for {len(symbols)} symbols on {trade_day}...")
+    day_data = ticks.fetch_minute_day_bulk(symbols=symbols, trade_day=trade_day)
 
-    print(f"\nTotal minutes: {len(minute_df)}")
-    print("\nFirst 5 minutes:")
-    print(minute_df.head(5))
-    print("\nLast 5 minutes:")
-    print(minute_df.tail(5))
+    for sym, bars in day_data.items():
+        print(f"\n{sym}: {len(bars)} minute bars")
+        if bars:
+            print(f"First bar: {bars[0]}")
+            print(f"Last bar: {bars[-1]}")

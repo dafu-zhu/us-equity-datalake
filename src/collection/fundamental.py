@@ -1,6 +1,6 @@
 import requests
 import time
-from collection.models import FndDataPoint
+from collection.models import FndDataPoint, DataSource
 import datetime as dt
 from typing import List, Optional, Tuple, Dict
 from pathlib import Path
@@ -11,7 +11,7 @@ import yaml
 
 HEADER = {'User-Agent': 'name@example.com'}
 
-FIELD_CONFIG_PATH = Path("data/config/approved_mapping.yaml")
+FIELD_CONFIG_PATH = Path("configs/approved_mapping.yaml")
 
 with open(FIELD_CONFIG_PATH) as file:
     MAPPINGS = yaml.safe_load(file)
@@ -21,7 +21,11 @@ def extract_concept(facts: dict, concept: str) -> Optional[dict]:
     """
     Extract a financial concept from SEC XBRL facts using mapping candidates.
 
-    Searches through gaap_candidates in priority order and returns the first available field.
+    Searches through candidate tags in priority order and returns the first available field.
+
+    Supports two mapping formats:
+    - New format: concept: [tag1, tag2, ...]
+    - Old format: concept: {gaap_candidates: [tag1, tag2, ...]}
 
     :param facts: Complete facts dictionary from SEC EDGAR API response
     :param concept: Concept name as defined in MAPPINGS (e.g., 'revenue', 'total assets')
@@ -38,7 +42,16 @@ def extract_concept(facts: dict, concept: str) -> Optional[dict]:
         raise KeyError(f"Concept '{concept}' not defined in MAPPINGS")
 
     mapping = MAPPINGS[concept]
-    tags = mapping['gaap_candidates']
+
+    # Support both old format {gaap_candidates: [...]} and new format [...]
+    if isinstance(mapping, dict):
+        # Old format: concept: {gaap_candidates: [...]}
+        tags = mapping.get('gaap_candidates', [])
+    elif isinstance(mapping, list):
+        # New format: concept: [...]
+        tags = mapping
+    else:
+        raise ValueError(f"Invalid mapping format for concept '{concept}': expected dict or list")
 
     for tag in tags:
         if ':' in tag:
@@ -294,17 +307,77 @@ class FundamentalTransformer:
                 )
 
         return calendar_lf.collect()
+    
 
+class EDGARDataSource(DataSource):
+    """EDGAR data source (2009+)"""
+
+    def __init__(self, cik: str, response: Optional[dict] = None, extractor: Optional[FundamentalExtractor] = None):
+        """
+        Initialize EDGAR data source.
+
+        :param cik: Company CIK number
+        :param response: Pre-fetched SEC EDGAR response (optional, for efficiency)
+        :param extractor: Pre-initialized FundamentalExtractor (optional, for reuse)
+        """
+        self.cik = cik
+        self.extractor = extractor or FundamentalExtractor()
+
+        # Use provided response or fetch new one
+        if response:
+            self.response = response
+        else:
+            client = SECClient()
+            self.response = client.fetch_company_facts(cik)
+
+    def supports_concept(self, concept: str) -> bool:
+        """Check if concept exists in approved_mapping.yaml"""
+        return concept in MAPPINGS
+
+    def extract_concept(self, concept: str) -> Optional[List[FndDataPoint]]:
+        """Extract using XBRL tag mapping"""
+        # Use the global extract_concept function to get field data
+        field_data = extract_concept(self.response['facts'], concept)
+
+        if field_data is None:
+            return None
+
+        # Unit selection logic (USD > shares > first available)
+        units = field_data['units']
+        if 'USD' in units:
+            raw_data = units['USD']
+        elif 'shares' in units:
+            raw_data = units['shares']
+        else:
+            raw_data = units[list(units.keys())[0]]
+
+        return self.extractor.parse_datapoints(raw_data)
+
+    def get_coverage_period(self) -> tuple[str, str]:
+        return ("2009-01-01", "2099-12-31")  # EDGAR coverage
+    
 
 class Fundamental:
     """
-    Orchestrator for fundamental data collection workflow.
-    Coordinates SECClient, FundamentalExtractor, and FundamentalTransformer.
+    Unified fundamental data collector with multi-source support.
+
+    Primary data source: SEC EDGAR (2009+)
+    Future: CRSP/Compustat for historical data (pre-2009)
+
+    Supports both:
+    - Concept-based extraction: get_concept_data('revenue')
+    - Legacy field-based extraction: get_dps('Revenues', 'us-gaap')
     """
 
-    def __init__(self, cik: str, symbol: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        cik: str,
+        symbol: Optional[str] = None,
+        permno: Optional[str] = None
+    ) -> None:
         self.cik = cik
         self.symbol = symbol
+        self.permno = permno  # For future CRSP integration
         self.log_dir = Path("data/logs/fundamental")
         self.calendar_path = Path("data/calendar/master.parquet")
         self.output_dir = Path("data/raw/fundamental")
@@ -319,8 +392,16 @@ class Fundamental:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Fetch company facts
+        # Fetch company facts from EDGAR
         self.req_response = self.client.fetch_company_facts(self.cik)
+
+        # Initialize data sources
+        self._sources: List[DataSource] = []
+
+        # Add EDGAR data source (uses already-fetched response for efficiency)
+        self._sources.append(
+            EDGARDataSource(cik=self.cik, response=self.req_response, extractor=self.extractor)
+        )
 
     def get_sec_field(self, field: str, fact_type: str) -> List[dict]:
         """
@@ -403,34 +484,69 @@ class Fundamental:
         )
         self.fields_df = result
         return result
+    
+    def get_concept_data(
+        self,
+        concept: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
+    ) -> Optional[List[FndDataPoint]]:
+        """
+        Extract data for a concept using the multi-source mapping system.
+
+        Tries data sources in priority order:
+        1. EDGAR (2009+)
+        2. CRSP (historical, pre-2009) - when implemented
+
+        :param concept: Concept name from fundamental.xlsx (e.g., 'revenue', 'total assets')
+        :param start_date: Optional start date filter "YYYY-MM-DD" (for future CRSP routing)
+        :param end_date: Optional end date filter "YYYY-MM-DD" (for future CRSP routing)
+        :return: List of FndDataPoint objects, or None if not available
+
+        Example:
+            >>> fund = Fundamental(cik='1819994')
+            >>> dps = fund.get_concept_data('revenue')  # Uses EDGAR by default
+            >>> # Future: dps = fund.get_concept_data('revenue', '2005-01-01', '2008-12-31')  # Would use CRSP
+        """
+        # Try each data source in priority order
+        for source in self._sources:
+            # Check if source supports this concept
+            if not source.supports_concept(concept):
+                continue
+
+            # Check date range compatibility (for future multi-source routing)
+            if start_date and end_date:
+                src_start, src_end = source.get_coverage_period()
+                # Simple overlap check: skip source if no overlap
+                if start_date > src_end or end_date < src_start:
+                    continue
+
+            # Try to extract data
+            data = source.extract_concept(concept)
+            if data:
+                return data
+
+        # No source could provide this concept
+        return None
 
 
 # Example usage
 if __name__ == "__main__":
     cik = '1819994'  # Rocket Lab USA Inc.
     symbol = 'RKLB'
-    fields = [
-        'CostOfGoodsAndServicesSold',  # May not be available for all companies
-        'Assets',
-        'Liabilities',
-        'StockholdersEquity',
-        'Revenues',  # Alternative field names to test
-        'CashAndCashEquivalentsAtCarryingValue'
-    ]
+    concepts = ['revenue', 'total assets', 'total liabilities']
     year = 2024
 
     # Create Fundamentals instance with symbol for better logging
     fund = Fundamental(cik, symbol=symbol)
 
     fields_dict = {}
-    for field in fields:
-        try:
-            dps = fund.get_dps(field, 'us-gaap')
-            fields_dict[field] = fund.get_value_tuple(dps)
-        except KeyError as error:
-            print(f"Field not found: {error}")
+    for concept in concepts:
+        dps = fund.get_concept_data(concept)
+        if dps:
+            fields_dict[concept] = fund.get_value_tuple(dps)
 
     start_day = f"{year}-01-01"
     end_day = f"{year}-12-31"
-    collect_df = fund.collect_fields_ffill(start_day, end_day, fields_dict)
+    collect_df = fund.collect_fields_raw(start_day, end_day, fields_dict)
     print(collect_df.head())
