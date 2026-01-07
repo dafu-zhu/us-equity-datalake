@@ -136,6 +136,10 @@ class UniverseManager:
                     'symbol': symbol,
                     'avg_dollar_vol': avg_dollar_vol
                 })
+        
+        if len(liquidity_data) == 0:
+            self.logger.error("No symbols passed liquidity filter")
+            return []
 
         # Create DataFrame and rank by liquidity
         liquidity_df = (
@@ -144,10 +148,6 @@ class UniverseManager:
             .sort('avg_dollar_vol', descending=True)
             .head(3000)
         )
-
-        if len(liquidity_df) == 0:
-            self.logger.error("No symbols passed liquidity filter")
-            return []
 
         # Log top and bottom stocks
         top_stock = liquidity_df.row(0)
