@@ -37,7 +37,10 @@ def align_calendar(
 
     # Create DataFrame and conditionally drop optional columns
     ticks_df = pl.DataFrame(data).with_columns([
-        pl.col('timestamp').str.to_date(format='%Y-%m-%d'),
+        pl.coalesce(
+            pl.col('timestamp').str.to_datetime(format='%Y-%m-%dT%H:%M:%S', strict=False),
+            pl.col('timestamp').str.to_date(strict=False).cast(pl.Datetime),
+        ).dt.date(),
         pl.col('open').cast(pl.Float64),
         pl.col('high').cast(pl.Float64),
         pl.col('low').cast(pl.Float64),
