@@ -63,6 +63,48 @@ class UniverseManager:
 
         return symbols
 
+    def load_symbols_for_year(self, year: int, sym_type: str = "alpaca") -> list[str]:
+        """
+        Load symbol list for a given year with format support.
+        Returns all stocks that were active at any point during the year.
+
+        SEC uses '-' as separator ('BRK-B'), Alpaca uses '.' ('BRK.B')
+
+        :param year: Year (e.g., 2024)
+        :param sym_type: "sec" or "alpaca" (default: "alpaca")
+        :return: List of symbols in the specified format
+        """
+        try:
+            # For years >= 2025 (using Alpaca), use current ticker list
+            if year >= 2025:
+                df = fetch_all_stocks(with_filter=True, refresh=False, logger=self.logger)
+                nasdaq_symbols = df['Ticker'].to_list()
+                self.logger.info(f"Using current ticker list for {year} ({len(nasdaq_symbols)} symbols)")
+            else:
+                # For historical years (< 2025), use CRSP historical universe
+                # Reuse CRSP database connection for performance
+                db = self.crsp_fetcher.conn if hasattr(self.crsp_fetcher, 'conn') else None
+                df = get_hist_universe_nasdaq(year, with_validation=False, db=db)
+                nasdaq_symbols = df['Ticker'].to_list()
+                self.logger.info(f"Using CRSP historical universe for {year} ({len(nasdaq_symbols)} symbols)")
+
+            if sym_type == "alpaca":
+                # Alpaca format is same as Nasdaq format (e.g., 'BRK.B')
+                symbols = nasdaq_symbols
+            elif sym_type == "sec":
+                # SEC format uses '-' instead of '.' (e.g., 'BRK-B')
+                symbols = [sym.replace('.', '-') for sym in nasdaq_symbols]
+            else:
+                msg = f"Expected sym_type: 'sec' or 'alpaca', get {sym_type}"
+                raise ValueError(msg)
+
+            self.logger.info(f"Loaded {len(symbols)} symbols for {year} (format={sym_type})")
+            return symbols
+
+        except Exception as e:
+            self.logger.error(f"Failed to load symbols for {year}: {e}", exc_info=True)
+            return []
+
     def get_top_3000(self, day: str, symbols: list[str], source: str) -> list[str]:
         """
         Fetch recent data and calculate top 3000 most liquid stocks (in-memory).
