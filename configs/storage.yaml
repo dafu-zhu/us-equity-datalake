@@ -19,15 +19,6 @@ client:
   request_checksum_calculation: when_supported
   response_checksum_validation: when_supported
 
-fields:
-  dei:
-    - EntityCommonStockSharesOutstanding
-    - EntityPublicFloat
-  us-gaap:
-    # Load from separate file: data/config/us-gaap-fields.txt
-    # See loader logic in application code
-    source: data/config/popular-gaap-fields.txt 
-
 transfer:
   multipart_threshold: 10485760  # 10*1024*1024 = 10 MB
   max_concurrency: 20

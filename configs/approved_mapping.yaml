@@ -1,0 +1,80 @@
+rev: # revenue
+- us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax
+- us-gaap:Revenues
+cor: # cost of revenue
+- us-gaap:CostOfRevenue
+op_inc: # operating income
+- us-gaap:OperatingIncomeLoss
+net_inc: # net income
+- us-gaap:NetIncomeLoss
+- us-gaap:NetIncomeLossAvailableToCommonStockholdersBasic
+ibt: # income before tax
+- us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest
+inc_tax_exp: # income tax expense
+- us-gaap:IncomeTaxExpenseBenefit
+- us-gaap:DeferredIncomeTaxExpenseBenefit
+int_exp: # interest expense
+- us-gaap:InterestExpenseNonoperating
+- us-gaap:InterestExpense
+- us-gaap:InterestExpenseDebt
+- us-gaap:FinanceLeaseInterestExpense
+rnd: # research and development
+- us-gaap:ResearchAndDevelopmentExpense
+sga: # selling general admin
+- us-gaap:SellingGeneralAndAdministrativeExpense
+dna: # depreciation and amortization
+- us-gaap:DepreciationDepletionAndAmortization
+- us-gaap:Depreciation
+- us-gaap:DepreciationAndAmortization
+cce: # cash and cash equivalents
+- us-gaap:CashAndCashEquivalentsAtCarryingValue
+ar: # accounts receivable
+- us-gaap:AccountsReceivableNetCurrent
+inv: # inventory
+- us-gaap:InventoryNet
+ca: # current assets
+- us-gaap:AssetsCurrent
+- us-gaap:PrepaidExpenseAndOtherAssetsCurrent
+- us-gaap:OtherAssetsCurrent
+ppe: # property plant equipment net
+- us-gaap:PropertyPlantAndEquipmentNet
+- us-gaap:PropertyPlantAndEquipmentGross
+gw: # goodwill
+- us-gaap:Goodwill
+ia: # intangible assets
+- us-gaap:IntangibleAssetsNetExcludingGoodwill
+- us-gaap:FiniteLivedIntangibleAssetsNet
+ta: # total assets
+- us-gaap:Assets
+ap: # accounts payable
+- us-gaap:AccountsPayableCurrent
+std: # short term debt
+- us-gaap:ShortTermBorrowings
+cl: # current liabilities
+- us-gaap:LiabilitiesCurrent
+- us-gaap:OtherLiabilitiesCurrent
+ltd: # long term debt
+- us-gaap:LongTermDebt
+- us-gaap:LongTermDebtNoncurrent
+tl: # total liabilities
+- us-gaap:Liabilities
+te: # total equity
+- us-gaap:StockholdersEquity
+sho: # shares outstanding
+- dei:EntityCommonStockSharesOutstanding
+- us-gaap:CommonStockSharesOutstanding
+- us-gaap:SharesOutstanding
+cfo: # cash flow from operating activities
+- us-gaap:NetCashProvidedByUsedInOperatingActivities
+cfi: # cash flow from investing activities
+- us-gaap:NetCashProvidedByUsedInInvestingActivities
+cff: # cash flow from financing activities
+- us-gaap:NetCashProvidedByUsedInFinancingActivities
+capex: # capital expenditures
+- us-gaap:CapitalExpendituresIncurredButNotYetPaid
+div: # dividends paid
+- us-gaap:PaymentsOfDividendsCommonStock
+- us-gaap:PaymentsOfDividends
+- us-gaap:DividendsCommonStockCash
+sto_isu: # stock issuance
+- us-gaap:ProceedsFromIssuanceOfCommonStock

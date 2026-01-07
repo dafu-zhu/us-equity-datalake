@@ -1,0 +1,181 @@
+revenue:
+- us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax
+- us-gaap:RevenueFromContractWithCustomerTextBlock
+- us-gaap:Revenues
+- us-gaap:ContractWithCustomerLiabilityRevenueRecognized
+- us-gaap:RevenueRemainingPerformanceObligation
+- us-gaap:RevenueRemainingPerformanceObligationExpectedTimingOfSatisfactionPeriod1
+- us-gaap:RevenueFromContractWithCustomerPolicyTextBlock
+- us-gaap:CostOfRevenue
+cost of revenue:
+- us-gaap:CostOfRevenue
+operating income:
+- us-gaap:OperatingIncomeLoss
+- us-gaap:NonoperatingIncomeExpense
+- us-gaap:IncreaseDecreaseInOtherOperatingAssets
+net income:
+- us-gaap:NetIncomeLoss
+- us-gaap:IncomeTaxExpenseBenefit
+- us-gaap:ComprehensiveIncomeNetOfTax
+- us-gaap:AccumulatedOtherComprehensiveIncomeLossNetOfTax
+- us-gaap:DeferredIncomeTaxExpenseBenefit
+- us-gaap:DeferredIncomeTaxLiabilitiesNet
+- us-gaap:OtherComprehensiveIncomeLossNetOfTax
+- us-gaap:DeferredIncomeTaxAssetsNet
+income before tax:
+- us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest
+- us-gaap:ComprehensiveIncomeNetOfTax
+- us-gaap:DeferredIncomeTaxExpenseBenefit
+- us-gaap:DeferredIncomeTaxLiabilitiesNet
+- us-gaap:OtherComprehensiveIncomeLossNetOfTax
+- us-gaap:DeferredIncomeTaxAssetsNet
+- us-gaap:DeferredIncomeTaxesAndTaxCredits
+income tax expense:
+- us-gaap:IncomeTaxExpenseBenefit
+- us-gaap:ComprehensiveIncomeNetOfTax
+- us-gaap:OtherNonoperatingIncomeExpense
+- us-gaap:DeferredIncomeTaxExpenseBenefit
+- us-gaap:OtherComprehensiveIncomeLossNetOfTax
+- us-gaap:DeferredIncomeTaxAssetsNet
+- us-gaap:OtherNoncashIncomeExpense
+- us-gaap:NonoperatingIncomeExpense
+interest expense:
+- us-gaap:InterestExpenseNonoperating
+- us-gaap:InterestIncomeExpenseNonoperatingNet
+- us-gaap:InterestExpense
+- us-gaap:InterestExpenseDebt
+- us-gaap:FinanceLeaseInterestExpense
+other operating income:
+- us-gaap:OperatingIncomeLoss
+- us-gaap:OtherNonoperatingIncomeExpense
+- us-gaap:IncreaseDecreaseInOtherOperatingAssets
+research and development:
+- us-gaap:ResearchAndDevelopmentExpense
+selling general admin:
+- us-gaap:SellingGeneralAndAdministrativeExpense
+depreciation and amortization:
+- us-gaap:DepreciationDepletionAndAmortization
+- us-gaap:AccumulatedDepreciationDepletionAndAmortizationPropertyPlantAndEquipment
+- us-gaap:Depreciation
+- us-gaap:DepreciationAndAmortization
+- us-gaap:AmortizationOfFinancingCostsAndDiscounts
+- us-gaap:PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization
+cash and cash equivalents:
+- us-gaap:CashAndCashEquivalentsAtCarryingValue
+- us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect
+- us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents
+- us-gaap:EffectOfExchangeRateOnCashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents
+- us-gaap:CashAndCashEquivalentsFairValueDisclosure
+- us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsIncludingDisposalGroupAndDiscontinuedOperations
+- us-gaap:CashAndCashEquivalentsPolicyTextBlock
+- us-gaap:BusinessCombinationRecognizedIdentifiableAssetsAcquiredAndLiabilitiesAssumedCashAndEquivalents
+short term investments: []
+accounts receivable:
+- us-gaap:AccountsReceivableNetCurrent
+- us-gaap:IncreaseDecreaseInAccountsReceivable
+- us-gaap:AllowanceForDoubtfulAccountsReceivableCurrent
+- us-gaap:AllowanceForDoubtfulAccountsReceivable
+- us-gaap:ScheduleOfAccountsNotesLoansAndFinancingReceivableTextBlock
+inventory:
+- us-gaap:InventoryNet
+- us-gaap:InventoryDisclosureTextBlock
+current assets:
+- us-gaap:Assets
+- us-gaap:AssetsCurrent
+- us-gaap:OtherAssetsNoncurrent
+- us-gaap:PrepaidExpenseAndOtherAssetsCurrent
+- us-gaap:OtherAssetsCurrent
+- us-gaap:BusinessCombinationRecognizedIdentifiableAssetsAcquiredAndLiabilitiesAssumedCurrentAssetsReceivables
+property plant equipment net:
+- us-gaap:PropertyPlantAndEquipmentNet
+- us-gaap:PaymentsToAcquirePropertyPlantAndEquipment
+- us-gaap:AccumulatedDepreciationDepletionAndAmortizationPropertyPlantAndEquipment
+- us-gaap:PropertyPlantAndEquipmentGross
+- us-gaap:PropertyPlantAndEquipmentTextBlock
+- us-gaap:ProceedsFromSaleOfPropertyPlantAndEquipment
+- us-gaap:PropertyPlantAndEquipmentDisclosureTextBlock
+- us-gaap:BusinessCombinationRecognizedIdentifiableAssetsAcquiredAndLiabilitiesAssumedPropertyPlantAndEquipment
+goodwill:
+- us-gaap:Goodwill
+- us-gaap:IntangibleAssetsNetExcludingGoodwill
+- us-gaap:GoodwillAndIntangibleAssetsDisclosureTextBlock
+- us-gaap:ScheduleOfGoodwillTextBlock
+- us-gaap:IndefiniteLivedIntangibleAssetsExcludingGoodwill
+- us-gaap:GoodwillImpairmentLoss
+- us-gaap:GoodwillForeignCurrencyTranslationGainLoss
+- us-gaap:IntangibleAssetsGrossExcludingGoodwill
+intangible assets:
+- us-gaap:Assets
+- us-gaap:IntangibleAssetsNetExcludingGoodwill
+- us-gaap:FiniteLivedIntangibleAssetsNet
+- us-gaap:FiniteLivedIntangibleAssetsAccumulatedAmortization
+- us-gaap:AmortizationOfIntangibleAssets
+- us-gaap:FiniteLivedIntangibleAssetsGross
+- us-gaap:GoodwillAndIntangibleAssetsDisclosureTextBlock
+- us-gaap:FiniteLivedIntangibleAssetsAmortizationExpenseYearTwo
+total assets:
+- us-gaap:Assets
+- us-gaap:OtherAssets
+accounts payable:
+- us-gaap:AccountsPayableCurrent
+- us-gaap:IncreaseDecreaseInAccountsPayable
+- us-gaap:IncreaseDecreaseInAccountsPayableAndAccruedLiabilities
+short term debt:
+- us-gaap:LongTermDebt
+- us-gaap:DebtInstrumentTerm
+- us-gaap:ShortTermBorrowings
+current liabilities:
+- us-gaap:LiabilitiesAndStockholdersEquity
+- us-gaap:Liabilities
+- us-gaap:LiabilitiesCurrent
+- us-gaap:OtherLiabilitiesNoncurrent
+- us-gaap:DeferredIncomeTaxLiabilitiesNet
+- us-gaap:AccruedLiabilitiesCurrent
+- us-gaap:EmployeeRelatedLiabilitiesCurrent
+- us-gaap:OtherLiabilitiesCurrent
+long term debt:
+- us-gaap:LongTermDebt
+- us-gaap:LongTermDebtNoncurrent
+- us-gaap:LongTermDebtCurrent
+- us-gaap:LongTermDebtFairValue
+- us-gaap:RepaymentsOfLongTermDebt
+- us-gaap:DebtInstrumentTerm
+- us-gaap:ProceedsFromIssuanceOfLongTermDebt
+- us-gaap:LongTermDebtMaturitiesRepaymentsOfPrincipalInNextTwelveMonths
+total liabilities:
+- us-gaap:LiabilitiesAndStockholdersEquity
+- us-gaap:Liabilities
+- us-gaap:LiabilitiesCurrent
+- us-gaap:OtherLiabilitiesNoncurrent
+- us-gaap:DeferredIncomeTaxLiabilitiesNet
+- us-gaap:AccruedLiabilitiesCurrent
+- us-gaap:EmployeeRelatedLiabilitiesCurrent
+- us-gaap:OtherLiabilitiesCurrent
+total equity: []
+shares outstanding:
+- dei:EntityCommonStockSharesOutstanding
+- us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding
+- us-gaap:WeightedAverageNumberOfSharesOutstandingBasic
+- us-gaap:CommonStockSharesOutstanding
+- us-gaap:PreferredStockSharesOutstanding
+- us-gaap:LettersOfCreditOutstandingAmount
+- us-gaap:SharesOutstanding
+- us-gaap:WeightedAverageNumberDilutedSharesOutstandingAdjustment
+cash flow from operating activities:
+- us-gaap:NetCashProvidedByUsedInOperatingActivities
+cash flow from investing activities:
+- us-gaap:NetCashProvidedByUsedInInvestingActivities
+- us-gaap:PaymentsForProceedsFromOtherInvestingActivities
+cash flow from financing activities:
+- us-gaap:NetCashProvidedByUsedInFinancingActivities
+- us-gaap:ProceedsFromPaymentsForOtherFinancingActivities
+capital expenditures:
+- us-gaap:CapitalExpendituresIncurredButNotYetPaid
+dividends paid:
+- us-gaap:CommonStockDividendsPerShareDeclared
+- us-gaap:PaymentsOfDividendsCommonStock
+- us-gaap:PaymentsOfDividends
+- us-gaap:DividendsCommonStockCash
+share repurchases: []
+stock issuance:
+- us-gaap:ProceedsFromIssuanceOfCommonStock
