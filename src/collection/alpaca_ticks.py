@@ -10,6 +10,7 @@ from dataclasses import asdict
 from dotenv import load_dotenv
 import polars as pl
 from pathlib import Path
+from tqdm import tqdm
 
 from collection.models import TickField, TickDataPoint
 from utils.logger import LoggerFactory
@@ -96,54 +97,58 @@ class Ticks:
         all_data = {}
         page_token = None
         page_count = 0
+        page_bar = tqdm(desc="Fetching pages", unit="page")
+        try:
+            while True:
+                page_count += 1
+                page_bar.update(1)
+                url = "https://data.alpaca.markets/v2/stocks/bars"
+                params = {
+                    "symbols": symbols_str,
+                    "timeframe": "1Day",
+                    "start": start_str,
+                    "end": end_str,
+                    "limit": 10000,
+                    "adjustment": "split",
+                    "feed": "sip",
+                    "sort": "asc"
+                }
 
-        while True:
-            page_count += 1
-            url = "https://data.alpaca.markets/v2/stocks/bars"
-            params = {
-                "symbols": symbols_str,
-                "timeframe": "1Day",
-                "start": start_str,
-                "end": end_str,
-                "limit": 10000,
-                "adjustment": "split",
-                "feed": "sip",
-                "sort": "asc"
-            }
+                if page_token:
+                    params["page_token"] = page_token
 
-            if page_token:
-                params["page_token"] = page_token
+                try:
+                    response = requests.get(url, headers=self.headers, params=params)
+                    time.sleep(0.1)  # Rate limiting: 200/min = ~3/sec, use 10/sec to be safe
 
-            try:
-                response = requests.get(url, headers=self.headers, params=params)
-                time.sleep(0.1)  # Rate limiting: 200/min = ~3/sec, use 10/sec to be safe
+                    if response.status_code != 200:
+                        self.logger.error(f"API Error [{response.status_code}]: {response.text}")
+                        break
 
-                if response.status_code != 200:
-                    self.logger.error(f"API Error [{response.status_code}]: {response.text}")
+                    data = response.json()
+
+                    # Accumulate bars for each symbol
+                    if 'bars' in data and data['bars']:
+                        for symbol, bars in data['bars'].items():
+                            if symbol not in all_data:
+                                all_data[symbol] = []
+                            all_data[symbol].extend(bars)
+
+                    # Check for next page
+                    page_token = data.get('next_page_token')
+                    if not page_token:
+                        self.logger.info(f"Completed fetching data in {page_count} page(s)")
+                        break
+
+                except Exception as e:
+                    self.logger.error(f"Request failed on page {page_count}: {e}")
                     break
-
-                data = response.json()
-
-                # Accumulate bars for each symbol
-                if 'bars' in data and data['bars']:
-                    for symbol, bars in data['bars'].items():
-                        if symbol not in all_data:
-                            all_data[symbol] = []
-                        all_data[symbol].extend(bars)
-
-                # Check for next page
-                page_token = data.get('next_page_token')
-                if not page_token:
-                    self.logger.info(f"Completed fetching data in {page_count} page(s)")
-                    break
-
-            except Exception as e:
-                self.logger.error(f"Request failed on page {page_count}: {e}")
-                break
+        finally:
+            page_bar.close()
 
         # Convert collected data to DataFrames
         result_dict = {}
-        for symbol, bars in all_data.items():
+        for symbol, bars in tqdm(all_data.items(), desc="Processing symbols", unit="sym"):
             if bars:
                 try:
                     parsed_ticks = self.parse_ticks(bars)
@@ -669,37 +674,6 @@ class Ticks:
             datapoints.append(dp)
 
         return datapoints
-    
-    def collect_daily_ticks(self, symbol: str, year: int, month: int, adjusted: bool=True) -> List[Dict[str, Any]]:
-        """
-        Collect daily ticks for a specific month and return as list of dicts (JSON format), align with trading days.
-
-        :param symbol: Stock symbol
-        :param year: Year (e.g., 2024)
-        :param month: Month (1-12)
-        :param adjusted: If True, apply split adjustments (default: True)
-        :return: List of dictionaries with daily OHLCV data
-        """
-        ticks = self.get_daily(symbol, year, month, adjusted)
-        parsed_ticks: List[TickDataPoint] = self.parse_ticks(ticks)
-
-        # Transform dataclass to dictionaries
-        ticks_data = [asdict(dp) for dp in parsed_ticks]
-
-        # Define date range for the month
-        start_date = dt.date(year, month, 1)
-        if month == 12:
-            end_date = dt.date(year, 12, 31)
-        else:
-            end_date = dt.date(year, month + 1, 1) - dt.timedelta(days=1)
-
-        # Merge with master calendar
-        calendar_path = self.calendar_dir / "master.parquet"
-        result = align_calendar(ticks_data, start_date, end_date, calendar_path)
-
-        return result
-    
-
 
 
 if __name__ == "__main__":
@@ -721,22 +695,6 @@ if __name__ == "__main__":
     for symbol, df in recent_data.items():
         print(f"\n{symbol}: {len(df)} records")
         print(df.head(3))
-
-    # Example 2: Fetch daily ticks for a full year (returns list of dictionaries)
-    print("\n" + "=" * 70)
-    print("Example 2: collect_daily_ticks")
-    print("=" * 70)
-
-    symbol = "AAPL"
-    year = 2024
-    month = 12
-
-    print(f"Fetching daily ticks for {symbol} in {year}-{month:02d}...")
-    daily_ticks = ticks.collect_daily_ticks(symbol=symbol, year=year, month=month, adjusted=True)
-
-    print(f"\nTotal records: {len(daily_ticks)}")
-    print("\nFirst 3 records:")
-    print(daily_ticks[:3])
 
     # Example 3: Bulk fetch minute ticks for multiple symbols for a month
     print("\n" + "=" * 70)
