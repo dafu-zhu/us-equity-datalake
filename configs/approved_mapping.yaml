@@ -1,80 +1,126 @@
 rev: # revenue
-- us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax
+- us-gaap:SalesRevenueNet
 - us-gaap:Revenues
+- ifrs-full:Revenue
+- us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax
 cor: # cost of revenue
 - us-gaap:CostOfRevenue
+- us-gaap:CostOfGoodsSold
+- ifrs-full:CostOfSales
+- us-gaap:CostsAndExpenses
 op_inc: # operating income
 - us-gaap:OperatingIncomeLoss
+- ifrs-full:ProfitLossFromOperatingActivities
+- us-gaap:ComprehensiveIncome
 net_inc: # net income
 - us-gaap:NetIncomeLoss
+- ifrs-full:ProfitLoss
 - us-gaap:NetIncomeLossAvailableToCommonStockholdersBasic
+- us-gaap:ComprehensiveIncomeNetOfTax
 ibt: # income before tax
 - us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest
+- ifrs-full:ProfitLossBeforeTax
 inc_tax_exp: # income tax expense
 - us-gaap:IncomeTaxExpenseBenefit
 - us-gaap:DeferredIncomeTaxExpenseBenefit
+- ifrs-full:IncomeTaxExpenseContinuingOperations
 int_exp: # interest expense
-- us-gaap:InterestExpenseNonoperating
 - us-gaap:InterestExpense
+- us-gaap:InterestExpenseNonoperating
 - us-gaap:InterestExpenseDebt
 - us-gaap:FinanceLeaseInterestExpense
+- ifrs:FinanceCosts
 rnd: # research and development
 - us-gaap:ResearchAndDevelopmentExpense
+- ifrs-full:ResearchAndDevelopmentExpense
 sga: # selling general admin
 - us-gaap:SellingGeneralAndAdministrativeExpense
+- ifrs-full:SellingGeneralAndAdministrativeExpense
 dna: # depreciation and amortization
 - us-gaap:DepreciationDepletionAndAmortization
 - us-gaap:Depreciation
 - us-gaap:DepreciationAndAmortization
+- ifrs-full:DepreciationAndAmortisationExpense
+- ifrs-full:DepreciationAmortisationAndImpairmentLossReversalOfImpairmentLossRecognisedInProfitOrLoss
 cce: # cash and cash equivalents
 - us-gaap:CashAndCashEquivalentsAtCarryingValue
+- ifrs-full:CashAndCashEquivalents
 ar: # accounts receivable
 - us-gaap:AccountsReceivableNetCurrent
+- us-gaap:NotesReceivableNet
+- ifrs-full:TradeAndOtherCurrentReceivables
 inv: # inventory
 - us-gaap:InventoryNet
+- ifrs-full:Inventories
 ca: # current assets
 - us-gaap:AssetsCurrent
 - us-gaap:PrepaidExpenseAndOtherAssetsCurrent
 - us-gaap:OtherAssetsCurrent
+- ifrs-full:CurrentAssets
 ppe: # property plant equipment net
 - us-gaap:PropertyPlantAndEquipmentNet
 - us-gaap:PropertyPlantAndEquipmentGross
+- ifrs-full:PropertyPlantAndEquipment
 gw: # goodwill
 - us-gaap:Goodwill
+- ifrs-full:Goodwill
 ia: # intangible assets
 - us-gaap:IntangibleAssetsNetExcludingGoodwill
 - us-gaap:FiniteLivedIntangibleAssetsNet
+- ifrs-full:IntangibleAssetsOtherThanGoodwill
 ta: # total assets
 - us-gaap:Assets
+- ifrs-full:Assets
 ap: # accounts payable
 - us-gaap:AccountsPayableCurrent
+- ifrs-full:TradeAndOtherCurrentPayables
 std: # short term debt
 - us-gaap:ShortTermBorrowings
+- ifrs-full:CurrentBorrowingsAndCurrentPortionOfNoncurrentBorrowings
+cpltd: # Current Portion of Long-Term Debt
+- us-gaap:LongTermDebtCurrent
+- ifrs-full:CurrentPortionOfLongtermBorrowings
 cl: # current liabilities
 - us-gaap:LiabilitiesCurrent
 - us-gaap:OtherLiabilitiesCurrent
+- ifrs-full:LiabilitiesCurrent
 ltd: # long term debt
 - us-gaap:LongTermDebt
 - us-gaap:LongTermDebtNoncurrent
+- ifrs-full:LongtermBorrowings
 tl: # total liabilities
 - us-gaap:Liabilities
+- ifrs-full:Liabilities
 te: # total equity
 - us-gaap:StockholdersEquity
+- ifrs-full:Equity
 sho: # shares outstanding
 - dei:EntityCommonStockSharesOutstanding
 - us-gaap:CommonStockSharesOutstanding
 - us-gaap:SharesOutstanding
+- ifrs-full:NumberOfSharesOutstanding
+- ifrs-full:SharesInEntityHeldByEntityOrByItsSubsidiariesOrAssociates
 cfo: # cash flow from operating activities
 - us-gaap:NetCashProvidedByUsedInOperatingActivities
+- ifrs-full:CashFlowsFromUsedInOperatingActivities
 cfi: # cash flow from investing activities
 - us-gaap:NetCashProvidedByUsedInInvestingActivities
+- ifrs-full:CashFlowsFromUsedInInvestingActivities
 cff: # cash flow from financing activities
 - us-gaap:NetCashProvidedByUsedInFinancingActivities
+- ifrs-full:CashFlowsFromUsedInFinancingActivities
 capex: # capital expenditures
 - us-gaap:CapitalExpendituresIncurredButNotYetPaid
+- us-gaap:PaymentsToAcquirePropertyPlantAndEquipment
+- ifrs-full:PurchaseOfPropertyPlantAndEquipment
+- ifrs-full:PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities
 div: # dividends paid
 - us-gaap:PaymentsOfDividendsCommonStock
 - us-gaap:PaymentsOfDividends
 - us-gaap:DividendsCommonStockCash
+- ifrs-full:DividendsPaidOrdinaryShares
+- ifrs-full:DividendsPaidClassifiedAsFinancingActivities
 sto_isu: # stock issuance
 - us-gaap:ProceedsFromIssuanceOfCommonStock
+- ifrs-full:ProceedsFromIssuingShares
+- ifrs-full:IssueOfEquity
