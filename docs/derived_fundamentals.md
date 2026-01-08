@@ -7,7 +7,7 @@ This document describes the derived fundamental metrics computed from raw fundam
 Derived fundamental data is computed from raw fundamental data collected from SEC EDGAR. These derived metrics provide additional insights into company performance, profitability, efficiency, and growth.
 
 **Storage Structure:**
-- **Input:** `data/raw/fundamental/{symbol}/{YYYY}/fundamental.parquet`
+- **Input:** `data/raw/fundamental/{symbol}/fundamental.parquet`
 - **Output:** `data/derived/fundamental/{symbol}/{YYYY}/fundamental.parquet`
 
 ## Derived Concepts
@@ -149,7 +149,7 @@ The computation uses **safe arithmetic operations**:
 Ensure raw fundamental data exists before computing derived metrics:
 ```bash
 # Check if raw data exists
-ls data/raw/fundamental/AAPL/2024/fundamental.parquet
+ls data/raw/fundamental/AAPL/fundamental.parquet
 
 # If missing, collect raw data first
 python -c "from src.collection.fundamental import Fundamental; ..."
@@ -191,7 +191,7 @@ logger = setup_logger(
 
 The `DerivedFundamental` class computes metrics in dependency order:
 
-1. **Load raw data** → from `data/raw/fundamental/{symbol}/{YYYY}/`
+1. **Load raw data** → from `data/raw/fundamental/{symbol}/`
 2. **Compute profitability** → margins, EBITDA
 3. **Compute balance sheet** → debt, working capital (needed for ROIC)
 4. **Compute cash flow** → FCF, FCF margin

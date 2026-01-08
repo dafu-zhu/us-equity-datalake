@@ -620,8 +620,8 @@ class Fundamental:
         2. CRSP (historical, pre-2009) - when implemented
 
         :param concept: Concept name from fundamental.xlsx (e.g., 'revenue', 'total assets')
-        :param start_date: Optional start date filter "YYYY-MM-DD" (for future CRSP routing)
-        :param end_date: Optional end date filter "YYYY-MM-DD" (for future CRSP routing)
+        :param start_date: Optional start date filter "YYYY-MM-DD" (filters on filing date)
+        :param end_date: Optional end date filter "YYYY-MM-DD" (filters on filing date)
         :return: List of FndDataPoint objects, or None if not available
 
         Example:
@@ -645,6 +645,22 @@ class Fundamental:
             # Try to extract data
             data = source.extract_concept(concept)
             if data:
+                if start_date or end_date:
+                    start_dt = (
+                        dt.datetime.strptime(start_date, "%Y-%m-%d").date()
+                        if start_date
+                        else None
+                    )
+                    end_dt = (
+                        dt.datetime.strptime(end_date, "%Y-%m-%d").date()
+                        if end_date
+                        else None
+                    )
+                    data = [
+                        dp for dp in data
+                        if (start_dt is None or dp.timestamp >= start_dt)
+                        and (end_dt is None or dp.timestamp <= end_dt)
+                    ]
                 return data
 
         # No source could provide this concept

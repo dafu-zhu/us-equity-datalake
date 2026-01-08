@@ -59,17 +59,17 @@ class Validator:
         For daily data, List all years we have for a symbol
 
         :param symbol: Stock to inspect
-        :param data_type: "ticks", "fundamental", "ttm", or "ttm_wide"
+        :param data_type: "ticks", "fundamental", or "ttm"
         """
         if data_type == "ticks":
             prefix = f'data/raw/{data_type}/daily/{symbol}/'
         elif data_type == "fundamental":
             prefix = f'data/raw/{data_type}/{symbol}/'
-        elif data_type in {"ttm", "ttm_wide"}:
+        elif data_type == "ttm":
             prefix = f'data/derived/features/fundamental/{symbol}/'
         else:
             raise ValueError(
-                f'Expected data_type is ticks, fundamental, ttm, or ttm_wide, get {data_type} instead'
+                f'Expected data_type is ticks, fundamental, or ttm, get {data_type} instead'
             )
 
         years = []
@@ -90,8 +90,9 @@ class Validator:
             # Extract years from object keys
             if 'Contents' in response:
                 for obj in response['Contents']:
-                    # Key format: {prefix}/2024/{data_type}.parquet
                     parts = obj['Key'].split('/')
+                    if data_type == "fundamental":
+                        continue
                     if len(parts) >= 6 and data_type in parts:
                         year = int(parts[-2])
                         if year not in years:
@@ -117,7 +118,7 @@ class Validator:
         For both daily and minute data, check if data exists
 
         :param symbol: Stock to inspect
-        :param data_type: "ticks" or "fundamental"
+        :param data_type: "ticks", "fundamental", or "ttm"
         :param year: Daily data only, specify year
         :param month: Daily data only, use YYYY/MM to locate
         :param day: Minute data only, specify trade day. Format: YYYY-MM-DD
@@ -144,22 +145,14 @@ class Validator:
             else:
                 raise ValueError(f'Must provide either year or day parameter. Got year={year}, day={day}')
         elif data_type == 'fundamental':
-            if year:
-                s3_key = f'{base_prefix}/{data_type}/{symbol}/{year}/{data_type}.parquet'
+            if data_tier == "derived":
+                s3_key = f'data/derived/features/fundamental/{symbol}/metrics.parquet'
             else:
-                raise ValueError('Expect input year')
+                s3_key = f'{base_prefix}/{data_type}/{symbol}/{data_type}.parquet'
         elif data_type == 'ttm':
-            if year:
-                s3_key = f'data/derived/features/fundamental/{symbol}/{year}/ttm.parquet'
-            else:
-                raise ValueError('Expect input year')
-        elif data_type == 'ttm_wide':
-            if year:
-                s3_key = f'data/derived/features/fundamental/{symbol}/{year}/ttm_wide.parquet'
-            else:
-                raise ValueError('Expect input year')
+            s3_key = f'data/derived/features/fundamental/{symbol}/ttm.parquet'
         else:
-            raise ValueError(f'Expected data_type is ticks, fundamental, ttm, or ttm_wide, get {data_type} instead')
+            raise ValueError(f'Expected data_type is ticks, fundamental, or ttm, get {data_type} instead')
         
         try:
             self.s3_client.head_object(

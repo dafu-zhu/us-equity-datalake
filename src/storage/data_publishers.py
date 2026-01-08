@@ -234,23 +234,24 @@ class DataPublishers:
     def publish_fundamental(
         self,
         sym: str,
-        year: int,
+        start_date: str,
+        end_date: str,
         cik: Optional[str],
         sec_rate_limiter,
         concepts: Optional[List[str]] = None,
         config_path: Optional[Path] = None
     ) -> Dict[str, Optional[str]]:
         """
-        Publish fundamental data for a single symbol for an entire year to S3.
+        Publish fundamental data for a single symbol for a date range to S3.
         Uses concept-based extraction with approved_mapping.yaml.
         Returns dict with status for progress tracking.
 
-        Storage: data/raw/fundamental/{symbol}/{ASOF_YEAR}/fundamental.parquet
-        ASOF_YEAR is derived from the filing date.
+        Storage: data/raw/fundamental/{symbol}/fundamental.parquet
         Stored in long format with [symbol, as_of_date, accn, form, concept, value, start, end, fp].
 
         :param sym: Symbol in Alpaca format (e.g., 'BRK.B') - used for storage path
-        :param year: Year to fetch data for
+        :param start_date: Start date (YYYY-MM-DD) for filing date filter
+        :param end_date: End date (YYYY-MM-DD) for filing date filter
         :param cik: CIK string (or None to skip)
         :param sec_rate_limiter: Rate limiter for SEC API
         :param concepts: Optional list of concepts to fetch. If None, fetches all from config.
@@ -263,7 +264,7 @@ class DataPublishers:
                 return {
                     'symbol': sym,
                     'status': 'skipped',
-                    'error': f'No CIK found for {sym} in {year}',
+                    'error': f'No CIK found for {sym} from {start_date} to {end_date}',
                     'cik': None
                 }
 
@@ -272,56 +273,50 @@ class DataPublishers:
 
             combined_df = self.data_collectors.collect_fundamental_long(
                 cik=cik,
-                year=year,
+                start_date=start_date,
+                end_date=end_date,
                 symbol=sym,
                 concepts=concepts,
                 config_path=config_path
             )
 
             if len(combined_df) == 0:
-                self.logger.warning(f'No fundamental data found for {sym} (CIK {cik}) in {year}')
+                self.logger.warning(
+                    f'No fundamental data found for {sym} (CIK {cik}) '
+                    f"from {start_date} to {end_date}"
+                )
                 return {
                     'symbol': sym,
                     'status': 'skipped',
-                    'error': f'No fundamental data available for {sym} in {year}',
+                    'error': f'No fundamental data available for {sym} from {start_date} to {end_date}',
                     'cik': cik
                 }
 
             concepts_total = len(self.data_collectors._load_concepts(concepts, config_path))
-            combined_df = combined_df.with_columns(
-                pl.col("as_of_date").str.slice(0, 4).alias("asof_year")
-            )
-            asof_years = combined_df.select(pl.col("asof_year").unique()).to_series().to_list()
+            # Setup S3 message
+            buffer = io.BytesIO()
+            combined_df.write_parquet(buffer)
+            buffer.seek(0)
 
-            for asof_year in asof_years:
-                year_df = combined_df.filter(pl.col("asof_year") == asof_year).drop("asof_year")
+            s3_key = f"data/raw/fundamental/{sym}/fundamental.parquet"
+            concepts_found = combined_df.select(pl.col("concept").n_unique()).item()
+            s3_metadata = {
+                'symbol': sym,
+                'data_type': 'fundamental',
+                'rows': str(len(combined_df)),
+                'concepts_found': str(concepts_found),
+                'concepts_total': str(concepts_total),
+                'start_date': start_date,
+                'end_date': end_date
+            }
+            # Allow list or dict as metadata value
+            s3_metadata_prepared = {
+                k: json.dumps(v) if isinstance(v, (list, dict)) else str(v)
+                for k, v in s3_metadata.items()
+            }
 
-                # Setup S3 message
-                buffer = io.BytesIO()
-                year_df.write_parquet(buffer)
-                buffer.seek(0)
-
-                s3_data = buffer
-                # ASOF-year storage: data/raw/fundamental/{symbol}/{ASOF_YEAR}/fundamental.parquet
-                # Use Alpaca format symbol (e.g., 'BRK.B') for consistency with ticks storage
-                s3_key = f"data/raw/fundamental/{sym}/{asof_year}/fundamental.parquet"
-                concepts_found = year_df.select(pl.col("concept").n_unique()).item()
-                s3_metadata = {
-                    'symbol': sym,
-                    'year': str(asof_year),
-                    'data_type': 'fundamental',
-                    'rows': str(len(year_df)),
-                    'concepts_found': str(concepts_found),
-                    'concepts_total': str(concepts_total)
-                }
-                # Allow list or dict as metadata value
-                s3_metadata_prepared = {
-                    k: json.dumps(v) if isinstance(v, (list, dict)) else str(v)
-                    for k, v in s3_metadata.items()
-                }
-
-                # Publish onto AWS S3
-                self.upload_fileobj(s3_data, s3_key, s3_metadata_prepared)
+            # Publish onto AWS S3
+            self.upload_fileobj(buffer, s3_key, s3_metadata_prepared)
 
             return {'symbol': sym, 'status': 'success', 'error': None, 'cik': cik}
 
@@ -341,21 +336,19 @@ class DataPublishers:
     def publish_ttm_fundamental(
         self,
         sym: str,
-        year: int,
+        start_date: str,
+        end_date: str,
         cik: Optional[str],
         sec_rate_limiter,
         concepts: Optional[List[str]] = None,
         config_path: Optional[Path] = None
     ) -> Dict[str, Optional[str]]:
         """
-        Publish TTM fundamental data for a single symbol for an entire year to S3.
+        Publish TTM fundamental data for a single symbol for a date range to S3.
         Computed in-memory from long-format raw data.
 
         Storage:
-        - data/derived/features/fundamental/{symbol}/{ASOF_YEAR}/ttm.parquet (long)
-        - data/derived/features/fundamental/{symbol}/{ASOF_YEAR}/ttm_wide.parquet (wide)
-        ASOF_YEAR is derived from the filing date.
-        TTM rows include ttm_period_end for period-axis filtering.
+        - data/derived/features/fundamental/{symbol}/ttm.parquet (long)
         """
         try:
             if cik is None:
@@ -363,7 +356,7 @@ class DataPublishers:
                 return {
                     'symbol': sym,
                     'status': 'skipped',
-                    'error': f'No CIK found for {sym} in {year}',
+                    'error': f'No CIK found for {sym} from {start_date} to {end_date}',
                     'cik': None
                 }
 
@@ -371,82 +364,46 @@ class DataPublishers:
 
             concepts_total = len(self.data_collectors._load_concepts(concepts, config_path))
 
-            ttm_df = self.data_collectors.collect_ttm_long(
+            ttm_df = self.data_collectors.collect_ttm_long_range(
                 cik=cik,
-                year=year,
+                start_date=start_date,
+                end_date=end_date,
                 symbol=sym,
                 concepts=concepts,
                 config_path=config_path
             )
-            wide_df = self.data_collectors.collect_ttm_wide(
-                cik=cik,
-                year=year,
-                symbol=sym,
-                concepts=concepts,
-                config_path=config_path
-            )
-
-            if len(ttm_df) == 0 or len(wide_df) == 0:
-                self.logger.info(f'No TTM data for {sym} (CIK {cik}) in {year}')
+            if len(ttm_df) == 0:
+                self.logger.info(
+                    f'No TTM data for {sym} (CIK {cik}) from {start_date} to {end_date}'
+                )
                 return {
                     'symbol': sym,
                     'status': 'skipped',
-                    'error': f'No TTM data available for {sym} in {year}',
+                    'error': f'No TTM data available for {sym} from {start_date} to {end_date}',
                     'cik': cik
                 }
 
-            ttm_df = ttm_df.with_columns(
-                pl.col("as_of_date").str.slice(0, 4).alias("asof_year")
-            )
-            wide_df = wide_df.with_columns(
-                pl.col("as_of_date").str.slice(0, 4).alias("asof_year")
-            )
-            asof_years = ttm_df.select(pl.col("asof_year").unique()).to_series().to_list()
+            buffer = io.BytesIO()
+            ttm_df.write_parquet(buffer)
+            buffer.seek(0)
 
-            for asof_year in asof_years:
-                year_df = ttm_df.filter(pl.col("asof_year") == asof_year).drop("asof_year")
-                wide_year_df = wide_df.filter(pl.col("asof_year") == asof_year).drop("asof_year")
+            s3_key = f"data/derived/features/fundamental/{sym}/ttm.parquet"
+            concepts_found = ttm_df.select(pl.col("concept").n_unique()).item()
+            s3_metadata = {
+                'symbol': sym,
+                'data_type': 'ttm',
+                'rows': str(len(ttm_df)),
+                'concepts_found': str(concepts_found),
+                'concepts_total': str(concepts_total),
+                'start_date': start_date,
+                'end_date': end_date
+            }
+            s3_metadata_prepared = {
+                k: json.dumps(v) if isinstance(v, (list, dict)) else str(v)
+                for k, v in s3_metadata.items()
+            }
 
-                buffer = io.BytesIO()
-                year_df.write_parquet(buffer)
-                buffer.seek(0)
-
-                s3_key = f"data/derived/features/fundamental/{sym}/{asof_year}/ttm.parquet"
-                concepts_found = year_df.select(pl.col("concept").n_unique()).item()
-                s3_metadata = {
-                    'symbol': sym,
-                    'year': str(asof_year),
-                    'data_type': 'ttm',
-                    'rows': str(len(year_df)),
-                    'concepts_found': str(concepts_found),
-                    'concepts_total': str(concepts_total)
-                }
-                s3_metadata_prepared = {
-                    k: json.dumps(v) if isinstance(v, (list, dict)) else str(v)
-                    for k, v in s3_metadata.items()
-                }
-
-                self.upload_fileobj(buffer, s3_key, s3_metadata_prepared)
-
-                buffer = io.BytesIO()
-                wide_year_df.write_parquet(buffer)
-                buffer.seek(0)
-
-                s3_key = f"data/derived/features/fundamental/{sym}/{asof_year}/ttm_wide.parquet"
-                s3_metadata = {
-                    'symbol': sym,
-                    'year': str(asof_year),
-                    'data_type': 'ttm_wide',
-                    'rows': str(len(wide_year_df)),
-                    'concepts_found': str(wide_year_df.width - 5),
-                    'concepts_total': str(concepts_total)
-                }
-                s3_metadata_prepared = {
-                    k: json.dumps(v) if isinstance(v, (list, dict)) else str(v)
-                    for k, v in s3_metadata.items()
-                }
-
-                self.upload_fileobj(buffer, s3_key, s3_metadata_prepared)
+            self.upload_fileobj(buffer, s3_key, s3_metadata_prepared)
 
             return {'symbol': sym, 'status': 'success', 'error': None, 'cik': cik}
 
@@ -466,17 +423,19 @@ class DataPublishers:
     def publish_derived_fundamental(
         self,
         sym: str,
-        year: int,
+        start_date: str,
+        end_date: str,
         derived_df: pl.DataFrame
     ) -> Dict[str, Optional[str]]:
         """
-        Publish derived fundamental data for a single symbol for an entire year to S3.
+        Publish derived fundamental data for a single symbol for a date range to S3.
 
-        Storage: data/derived/features/fundamental/{symbol}/{YYYY}/metrics.parquet
+        Storage: data/derived/features/fundamental/{symbol}/metrics.parquet
         Contains ONLY derived metrics (keys + 24 derived columns).
 
         :param sym: Symbol in Alpaca format (e.g., 'BRK.B')
-        :param year: Year of data
+        :param start_date: Start date (YYYY-MM-DD)
+        :param end_date: End date (YYYY-MM-DD)
         :param derived_df: Derived DataFrame (from compute_derived)
         :return: Dict with status info
         """
@@ -496,14 +455,14 @@ class DataPublishers:
             buffer.seek(0)
 
             s3_data = buffer
-            # Year-based storage: data/derived/features/fundamental/{symbol}/{YYYY}/metrics.parquet
-            s3_key = f"data/derived/features/fundamental/{sym}/{year}/metrics.parquet"
+            s3_key = f"data/derived/features/fundamental/{sym}/metrics.parquet"
             s3_metadata = {
                 'symbol': sym,
-                'year': str(year),
                 'data_type': 'derived_metrics',
-                'quarters': str(len(derived_df)),
-                'columns': str(derived_df.shape[1])
+                'rows': str(len(derived_df)),
+                'columns': str(derived_df.shape[1]),
+                'start_date': start_date,
+                'end_date': end_date
             }
 
             # Allow list or dict as metadata value

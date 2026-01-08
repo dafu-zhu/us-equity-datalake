@@ -1,12 +1,12 @@
 """
 Derived Fundamental Metrics Computation
 
-Computes derived fundamental metrics from TTM wide-format data.
+Computes derived fundamental metrics from long-format TTM data.
 
 This module provides in-memory computation for the storage pipeline.
 Derived data is stored separately from raw data:
-- Input TTM: data/derived/features/fundamental/{symbol}/{ASOF_YEAR}/ttm_wide.parquet
-- Output metrics: data/derived/fundamental/{symbol}/{YYYY}/fundamental.parquet
+- Input TTM: data/derived/features/fundamental/{symbol}/ttm.parquet (long)
+- Output metrics: data/derived/features/fundamental/{symbol}/metrics.parquet (long)
 """
 
 import polars as pl
@@ -20,18 +20,18 @@ def compute_derived(
     symbol: Optional[str] = None
 ) -> pl.DataFrame:
     """
-    Compute derived fundamental metrics from TTM wide-format data.
+    Compute derived fundamental metrics from long-format TTM data.
 
-    Takes a TTM wide DataFrame and computes 24 derived metrics.
-    Returns keys plus derived columns.
+    Takes a TTM long DataFrame and computes 24 derived metrics.
+    Returns long-format derived metrics.
 
     All formulas based on data/xbrl/fundamental.xlsx (Priority = 3 rows).
 
-    :param raw_df: TTM wide DataFrame with columns
-                   [symbol, as_of_date, ttm_period_end, start, end, rev, cor, op_inc, ...]
+    :param raw_df: TTM long DataFrame with columns
+                   [symbol, as_of_date, start, end, concept, value, accn, form, fp]
     :param logger: Optional logger for debug messages
     :param symbol: Optional symbol for logging
-    :return: DataFrame with keys and derived columns
+    :return: Long-format DataFrame with keys and derived columns
              Returns empty DataFrame if input is empty
 
     Derived concepts (24 total):
@@ -43,11 +43,11 @@ def compute_derived(
     - Accruals: acc, wc_acc
 
     Example:
-        >>> raw_df = collect_ttm_wide(cik='0001819994', year=2024)
+        >>> raw_df = ttm_df_long
         >>> derived_df = compute_derived(raw_df, logger, symbol='RKLB')
         >>> # Store separately:
-        >>> # - raw_df → data/derived/features/fundamental/RKLB/2024/ttm_wide.parquet
-        >>> # - derived_df → data/derived/fundamental/RKLB/2024/fundamental.parquet
+        >>> # - raw_df → data/derived/features/fundamental/RKLB/ttm.parquet
+        >>> # - derived_df → data/derived/features/fundamental/RKLB/metrics.parquet
     """
     # Return empty DataFrame if input is empty
     if len(raw_df) == 0:
@@ -57,9 +57,39 @@ def compute_derived(
 
     log_prefix = f"{symbol}: " if symbol else ""
     try:
+        required_cols = {
+            "symbol",
+            "as_of_date",
+            "start",
+            "end",
+            "concept",
+            "value",
+        }
+        missing_cols = required_cols - set(raw_df.columns)
+        if missing_cols:
+            if logger:
+                logger.debug(f"{log_prefix}Missing columns for derived: {sorted(missing_cols)}")
+            return pl.DataFrame()
+
         df = raw_df.clone()
         if "as_of_date" in df.columns:
             df = df.sort("as_of_date")
+
+        metadata_cols = [col for col in ["accn", "form", "fp"] if col in df.columns]
+        metadata_df = None
+        if metadata_cols:
+            metadata_df = (
+                df.select(["symbol", "as_of_date", "start", "end"] + metadata_cols)
+                .group_by(["symbol", "as_of_date", "start", "end"])
+                .agg([pl.col(col).last() for col in metadata_cols])
+            )
+
+        wide_df = df.pivot(
+            values="value",
+            index=["symbol", "as_of_date", "start", "end"],
+            on="concept",
+            aggregate_function="first",
+        )
 
         required_inputs = [
             "rev", "cor", "op_inc", "net_inc", "dna",
@@ -67,9 +97,9 @@ def compute_derived(
             "cfo", "capex", "ta", "te",
             "inc_tax_exp", "ibt",
         ]
-        missing_inputs = [col for col in required_inputs if col not in df.columns]
+        missing_inputs = [col for col in required_inputs if col not in wide_df.columns]
         if missing_inputs:
-            df = df.with_columns([pl.lit(None).alias(col) for col in missing_inputs])
+            wide_df = wide_df.with_columns([pl.lit(None).alias(col) for col in missing_inputs])
 
         # Helper functions for safe arithmetic
         def safe_divide(numerator: pl.Expr, denominator: pl.Expr) -> pl.Expr:
@@ -90,7 +120,7 @@ def compute_derived(
         if logger:
             logger.debug(f"{log_prefix}Computing profitability metrics")
 
-        df = df.with_columns([
+        df = wide_df.sort(["symbol", "as_of_date"]).with_columns([
             # Gross Profit = revenue - cost of revenue
             safe_subtract(pl.col("rev"), pl.col("cor")).alias("grs_pft"),
         ]).with_columns([
@@ -138,9 +168,9 @@ def compute_derived(
 
         df = df.with_columns([
             # Average Assets = (total assets(t) + total assets(t-1)) / 2
-            ((pl.col("ta") + pl.col("ta").shift(1)) / 2).alias("avg_ast"),
+            ((pl.col("ta") + pl.col("ta").shift(1).over("symbol")) / 2).alias("avg_ast"),
             # Average Equity = (total equity(t) + total equity(t-1)) / 2
-            ((pl.col("te") + pl.col("te").shift(1)) / 2).alias("avg_eqt"),
+            ((pl.col("te") + pl.col("te").shift(1).over("symbol")) / 2).alias("avg_eqt"),
             # Effective Tax Rate = income tax expense / income before tax
             safe_divide(pl.col("inc_tax_exp"), pl.col("ibt")).alias("etr"),
         ]).with_columns([
@@ -167,9 +197,9 @@ def compute_derived(
 
         df = df.with_columns([
             # Revenue Growth = revenue(t) - revenue(t-1)
-            (pl.col("rev") - pl.col("rev").shift(1)).alias("rev_grw"),
+            (pl.col("rev") - pl.col("rev").shift(1).over("symbol")).alias("rev_grw"),
             # Asset Growth = total assets(t) - total assets(t-1)
-            (pl.col("ta") - pl.col("ta").shift(1)).alias("ast_grw"),
+            (pl.col("ta") - pl.col("ta").shift(1).over("symbol")).alias("ast_grw"),
             # Investment Rate = capex / total assets
             safe_divide(pl.col("capex"), pl.col("ta")).alias("inv_rt"),
         ])
@@ -183,14 +213,14 @@ def compute_derived(
             safe_subtract(pl.col("net_inc"), pl.col("cfo")).alias("acc"),
             # WC Accruals = Delta(working capital) - depreciation and amortization
             safe_subtract(
-                (pl.col("wc") - pl.col("wc").shift(1)),
+                (pl.col("wc") - pl.col("wc").shift(1).over("symbol")),
                 pl.col("dna")
             ).alias("wc_acc"),
         ])
 
-        # Extract ONLY derived columns (timestamp + 24 derived metrics)
+        # Extract ONLY derived columns (keys + 24 derived metrics)
         key_columns = [
-            'symbol', 'as_of_date', 'ttm_period_end', 'start', 'end'
+            'symbol', 'as_of_date', 'start', 'end'
         ]
         derived_columns = [
             # Profitability (5)
@@ -210,13 +240,27 @@ def compute_derived(
         select_cols = [col for col in key_columns if col in df.columns] + derived_columns
         derived_df = df.select(select_cols)
 
-        if logger:
-            logger.debug(
-                f"{log_prefix}Derived computation complete: {derived_df.shape[0]} rows, "
-                f"{derived_df.shape[1]} columns (keys + 24 derived)"
+        long_df = derived_df.melt(
+            id_vars=key_columns,
+            value_vars=derived_columns,
+            variable_name="concept",
+            value_name="value",
+        ).drop_nulls(subset=["value"])
+
+        if metadata_df is not None:
+            long_df = long_df.join(
+                metadata_df,
+                on=["symbol", "as_of_date", "start", "end"],
+                how="left",
             )
 
-        return derived_df
+        if logger:
+            logger.debug(
+                f"{log_prefix}Derived computation complete: {long_df.shape[0]} rows, "
+                f"{long_df.shape[1]} columns (long format)"
+            )
+
+        return long_df
 
     except Exception as e:
         if logger:

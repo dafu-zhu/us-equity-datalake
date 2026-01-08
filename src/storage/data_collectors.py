@@ -19,6 +19,7 @@ import polars as pl
 from collection.models import TickField
 from collection.fundamental import Fundamental, DURATION_CONCEPTS
 from derived.ttm import compute_ttm_long
+from derived.metrics import compute_derived
 
 
 class DataCollectors:
@@ -90,13 +91,14 @@ class DataCollectors:
     def collect_fundamental_long(
         self,
         cik: str,
-        year: int,
+        start_date: str,
+        end_date: str,
         symbol: Optional[str] = None,
         concepts: Optional[List[str]] = None,
         config_path: Optional[Path] = None
     ) -> pl.DataFrame:
         """
-        Fetch long-format fundamental data for a filing year.
+        Fetch long-format fundamental data for a filing date range.
 
         Returns columns:
         [symbol, as_of_date, accn, form, concept, value, start, end, fp]
@@ -106,8 +108,8 @@ class DataCollectors:
 
             # Use cached Fundamental object to avoid redundant API calls
             fnd = self._get_or_create_fundamental(cik=cik, symbol=symbol)
-            start_date = dt.date(year, 1, 1)
-            end_date = dt.date(year, 12, 31)
+            start_dt = dt.datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_dt = dt.datetime.strptime(end_date, "%Y-%m-%d").date()
 
             records = []
             concepts_found = []
@@ -115,11 +117,15 @@ class DataCollectors:
 
             for concept in concepts:
                 try:
-                    dps = fnd.get_concept_data(concept)
+                    dps = fnd.get_concept_data(
+                        concept,
+                        start_date=start_date,
+                        end_date=end_date
+                    )
                     if dps:
                         concepts_found.append(concept)
                         for dp in dps:
-                            if not (start_date <= dp.timestamp <= end_date):
+                            if not (start_dt <= dp.timestamp <= end_dt):
                                 continue
                             records.append(
                                 {
@@ -141,7 +147,10 @@ class DataCollectors:
                     concepts_missing.append(concept)
 
             if not records:
-                self.logger.warning(f"No fundamental data found for CIK {cik} ({symbol}) in {year}")
+                self.logger.warning(
+                    f"No fundamental data found for CIK {cik} ({symbol}) "
+                    f"from {start_date} to {end_date}"
+                )
                 return pl.DataFrame()
 
             self.logger.debug(
@@ -152,27 +161,30 @@ class DataCollectors:
             return pl.DataFrame(records)
 
         except Exception as e:
-            self.logger.error(f"Failed to collect fundamental data for CIK {cik} ({symbol}) in {year}: {e}")
+            self.logger.error(
+                f"Failed to collect fundamental data for CIK {cik} ({symbol}) "
+                f"from {start_date} to {end_date}: {e}"
+            )
             return pl.DataFrame()
 
-    def collect_ttm_long(
+    def collect_ttm_long_range(
         self,
         cik: str,
-        year: int,
+        start_date: str,
+        end_date: str,
         symbol: Optional[str] = None,
         concepts: Optional[List[str]] = None,
         config_path: Optional[Path] = None
     ) -> pl.DataFrame:
         """
-        Compute TTM long-format data in memory for a filing year.
+        Compute TTM long-format data in memory for a date range.
         """
         try:
             concepts = self._load_concepts(concepts, config_path)
+            end_dt = dt.datetime.strptime(end_date, "%Y-%m-%d").date()
+            start_dt = dt.datetime.strptime(start_date, "%Y-%m-%d").date()
 
-            # Use cached Fundamental object to avoid redundant API calls
             fnd = self._get_or_create_fundamental(cik=cik, symbol=symbol)
-            start_limit = dt.date(year - 1, 1, 1)
-            end_limit = dt.date(year, 12, 31)
 
             records = []
             for concept in concepts:
@@ -181,7 +193,7 @@ class DataCollectors:
                     if not dps:
                         continue
                     for dp in dps:
-                        if dp.end_date < start_limit or dp.end_date > end_limit:
+                        if dp.end_date and dp.end_date > end_dt:
                             continue
                         records.append(
                             {
@@ -200,79 +212,51 @@ class DataCollectors:
                     self.logger.debug(f"Failed to extract concept '{concept}' for CIK {cik}: {e}")
 
             if not records:
-                self.logger.warning(f"No fundamental data found for CIK {cik} ({symbol}) in {year}")
+                self.logger.warning(
+                    f"No fundamental data found for CIK {cik} ({symbol}) "
+                    f"from {start_date} to {end_date}"
+                )
                 return pl.DataFrame()
 
-            return compute_ttm_long(pl.DataFrame(records), logger=self.logger, symbol=symbol)
+            ttm_df = compute_ttm_long(pl.DataFrame(records), logger=self.logger, symbol=symbol)
+            if len(ttm_df) == 0:
+                return pl.DataFrame()
+
+            return ttm_df.filter(
+                (pl.col("as_of_date") >= start_dt.strftime("%Y-%m-%d"))
+                & (pl.col("as_of_date") <= end_dt.strftime("%Y-%m-%d"))
+                & (pl.col("end") >= start_dt.strftime("%Y-%m-%d"))
+                & (pl.col("end") <= end_dt.strftime("%Y-%m-%d"))
+            )
 
         except Exception as e:
-            self.logger.error(f"Failed to compute TTM for CIK {cik} ({symbol}) in {year}: {e}")
+            self.logger.error(
+                f"Failed to compute TTM for CIK {cik} ({symbol}) "
+                f"from {start_date} to {end_date}: {e}"
+            )
             return pl.DataFrame()
 
-    def collect_ttm_wide(
+    def _build_metrics_wide(
         self,
         cik: str,
-        year: int,
+        start_date: str,
+        end_date: str,
         symbol: Optional[str] = None,
         concepts: Optional[List[str]] = None,
         config_path: Optional[Path] = None
     ) -> pl.DataFrame:
-        """
-        Compute TTM wide-format data in memory for a filing year.
-        """
-        concepts_list = self._load_concepts(concepts, config_path)
-        expected_concepts = [c for c in concepts_list if c in DURATION_CONCEPTS]
-
-        ttm_df = self.collect_ttm_long(cik, year, symbol, concepts, config_path)
-        if len(ttm_df) == 0:
-            empty_cols = {
-                "symbol": [],
-                "as_of_date": [],
-                "ttm_period_end": [],
-                "start": [],
-                "end": [],
-            }
-            for concept in expected_concepts:
-                empty_cols[concept] = []
-            return pl.DataFrame(empty_cols)
-
-        wide_df = ttm_df.pivot(
-            values="value",
-            index=["symbol", "as_of_date", "ttm_period_end", "start", "end"],
-            columns="concept",
-            aggregate_function="first",
-        )
-        missing_cols = [c for c in expected_concepts if c not in wide_df.columns]
-        if missing_cols:
-            wide_df = wide_df.with_columns([pl.lit(None).alias(c) for c in missing_cols])
-
-        return wide_df
-
-    def collect_metrics_wide(
-        self,
-        cik: str,
-        year: int,
-        symbol: Optional[str] = None,
-        concepts: Optional[List[str]] = None,
-        config_path: Optional[Path] = None
-    ) -> pl.DataFrame:
-        """
-        Build metrics-wide inputs by combining TTM flows with latest balance-sheet values.
-        """
         concepts_list = self._load_concepts(concepts, config_path)
         stock_concepts = [c for c in concepts_list if c not in DURATION_CONCEPTS]
         duration_concepts = [c for c in concepts_list if c in DURATION_CONCEPTS]
 
         try:
-            fund = Fundamental(cik=cik, symbol=symbol)
+            fund = self._get_or_create_fundamental(cik=cik, symbol=symbol)
         except Exception as e:
             self.logger.error(f"Failed to initialize Fundamental for CIK {cik} ({symbol}): {e}")
             return pl.DataFrame()
 
-        ttm_start = dt.date(year - 1, 1, 1)
-        ttm_end = dt.date(year, 12, 31)
-        raw_start = dt.date(year, 1, 1)
-        raw_end = dt.date(year, 12, 31)
+        start_dt = dt.datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_dt = dt.datetime.strptime(end_date, "%Y-%m-%d").date()
 
         ttm_records = []
         raw_records = []
@@ -288,7 +272,7 @@ class DataCollectors:
                 continue
 
             for dp in dps:
-                if raw_start <= dp.timestamp <= raw_end:
+                if start_dt <= dp.timestamp <= end_dt:
                     raw_records.append(
                         {
                             "symbol": symbol,
@@ -303,7 +287,7 @@ class DataCollectors:
                         }
                     )
 
-                if concept in DURATION_CONCEPTS and ttm_start <= dp.end_date <= ttm_end:
+                if concept in DURATION_CONCEPTS and dp.end_date and dp.end_date <= end_dt:
                     ttm_records.append(
                         {
                             "symbol": symbol,
@@ -322,7 +306,6 @@ class DataCollectors:
             empty_cols = {
                 "symbol": [],
                 "as_of_date": [],
-                "ttm_period_end": [],
                 "start": [],
                 "end": [],
             }
@@ -335,7 +318,22 @@ class DataCollectors:
             empty_cols = {
                 "symbol": [],
                 "as_of_date": [],
-                "ttm_period_end": [],
+                "start": [],
+                "end": [],
+            }
+            for concept in duration_concepts + stock_concepts:
+                empty_cols[concept] = []
+            return pl.DataFrame(empty_cols)
+        ttm_df = ttm_df.filter(
+            (pl.col("as_of_date") >= start_dt.strftime("%Y-%m-%d"))
+            & (pl.col("as_of_date") <= end_dt.strftime("%Y-%m-%d"))
+            & (pl.col("end") >= start_dt.strftime("%Y-%m-%d"))
+            & (pl.col("end") <= end_dt.strftime("%Y-%m-%d"))
+        )
+        if len(ttm_df) == 0:
+            empty_cols = {
+                "symbol": [],
+                "as_of_date": [],
                 "start": [],
                 "end": [],
             }
@@ -345,8 +343,8 @@ class DataCollectors:
 
         ttm_wide = ttm_df.pivot(
             values="value",
-            index=["symbol", "as_of_date", "ttm_period_end", "start", "end"],
-            columns="concept",
+            index=["symbol", "as_of_date", "start", "end"],
+            on="concept",
             aggregate_function="first",
         )
         missing_duration = [c for c in duration_concepts if c not in ttm_wide.columns]
@@ -376,7 +374,7 @@ class DataCollectors:
                 .pivot(
                     values="value",
                     index="as_of_date",
-                    columns="concept",
+                    on="concept",
                     aggregate_function="first",
                 )
                 .sort("as_of_date")
@@ -388,6 +386,77 @@ class DataCollectors:
             base = base.with_columns([pl.lit(None).alias(c) for c in missing_cols])
 
         return base.with_columns(pl.col("as_of_date").dt.strftime("%Y-%m-%d"))
+
+    def collect_derived_long(
+        self,
+        cik: str,
+        start_date: str,
+        end_date: str,
+        symbol: Optional[str] = None,
+        concepts: Optional[List[str]] = None,
+        config_path: Optional[Path] = None
+    ) -> pl.DataFrame:
+        """
+        Compute derived metrics and return long-format data.
+
+        Returns columns: [symbol, as_of_date, start, end, accn, form, fp, concept, value]
+        """
+        metrics_wide = self._build_metrics_wide(
+            cik=cik,
+            start_date=start_date,
+            end_date=end_date,
+            symbol=symbol,
+            concepts=concepts,
+            config_path=config_path
+        )
+        if len(metrics_wide) == 0:
+            return pl.DataFrame()
+
+        id_cols = ["symbol", "as_of_date", "start", "end"]
+        value_cols = [c for c in metrics_wide.columns if c not in id_cols]
+        long_input = metrics_wide.melt(
+            id_vars=id_cols,
+            value_vars=value_cols,
+            variable_name="concept",
+            value_name="value",
+        ).drop_nulls(subset=["value"])
+
+        # Use TTM metadata for derived rows (accn/form/fp)
+        ttm_df = self.collect_ttm_long_range(
+            cik=cik,
+            start_date=start_date,
+            end_date=end_date,
+            symbol=symbol,
+            concepts=concepts,
+            config_path=config_path
+        )
+        metadata_df = None
+        if len(ttm_df) > 0:
+            metadata_df = (
+                ttm_df.select(["symbol", "as_of_date", "start", "end", "accn", "form", "fp"])
+                .group_by(["symbol", "as_of_date", "start", "end"])
+                .agg([pl.col("accn").last(), pl.col("form").last(), pl.col("fp").last()])
+            )
+
+        if metadata_df is not None:
+            long_input = long_input.join(
+                metadata_df,
+                on=["symbol", "as_of_date", "start", "end"],
+                how="left",
+            )
+
+        derived_long = compute_derived(long_input, logger=self.logger, symbol=symbol)
+        if len(derived_long) == 0:
+            return pl.DataFrame()
+
+        start_dt = dt.datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_dt = dt.datetime.strptime(end_date, "%Y-%m-%d").date()
+        return derived_long.filter(
+            (pl.col("as_of_date") >= start_dt.strftime("%Y-%m-%d"))
+            & (pl.col("as_of_date") <= end_dt.strftime("%Y-%m-%d"))
+            & (pl.col("end") >= start_dt.strftime("%Y-%m-%d"))
+            & (pl.col("end") <= end_dt.strftime("%Y-%m-%d"))
+        )
 
     def collect_daily_ticks_year(self, sym: str, year: int) -> pl.DataFrame:
         """
@@ -575,107 +644,3 @@ class DataCollectors:
                     result[(sym, day)] = pl.DataFrame()
 
         return result
-
-    def collect_fundamental_year(
-        self,
-        cik: str,
-        year: int,
-        symbol: Optional[str] = None,
-        concepts: Optional[List[str]] = None,
-        config_path: Optional[Path] = None,
-        previous_row: Optional[pl.DataFrame] = None
-    ) -> pl.DataFrame:
-        """
-        Fetch fundamental data for a specific year using approved_mapping.yaml concepts.
-        Returns only actual filing dates (quarterly data points) without forward-filling.
-
-        :param cik: Company CIK number
-        :param year: Year to fetch data for
-        :param symbol: Optional symbol for logging (e.g., 'AAPL')
-        :param concepts: Optional list of concepts to fetch. If None, fetches all concepts from config.
-        :param config_path: Optional path to approved_mapping.yaml (defaults to configs/approved_mapping.yaml)
-        :param previous_row: Optional single-row DataFrame to prepend for shift-based metrics
-        :return: Polars DataFrame with columns [timestamp, concept1, concept2, ...]
-                 Returns empty DataFrame if no data available or error occurs
-
-        Example:
-            >>> collector = DataCollectors(...)
-            >>> df = collector.collect_fundamental_year(cik='0001819994', year=2024, symbol='RKLB')
-            >>> # Returns DataFrame with columns: timestamp, rev, net_inc, ta, tl, te, etc.
-        """
-        try:
-            # Load concept mappings if not provided
-            if concepts is None:
-                if config_path is None:
-                    config_path = Path("configs/approved_mapping.yaml")
-
-                with open(config_path) as f:
-                    mappings = yaml.safe_load(f)
-                    concepts = list(mappings.keys())
-                    self.logger.debug(f"Loaded {len(concepts)} concepts from {config_path}")
-
-            # Use cached Fundamental object to avoid redundant API calls
-            fund = self._get_or_create_fundamental(cik=cik, symbol=symbol)
-
-            # Collect data for each concept
-            fields_dict = {}
-            concepts_found = []
-            concepts_missing = []
-
-            for concept in concepts:
-                try:
-                    dps = fund.get_concept_data(concept)
-                    if dps:
-                        fields_dict[concept] = fund.get_value_tuple(dps)
-                        concepts_found.append(concept)
-                    else:
-                        # Add missing concept with empty list to ensure column exists with null values
-                        fields_dict[concept] = []
-                        concepts_missing.append(concept)
-                except Exception as e:
-                    self.logger.debug(f"Failed to extract concept '{concept}' for CIK {cik}: {e}")
-                    # Add failed concept with empty list to ensure column exists with null values
-                    fields_dict[concept] = []
-                    concepts_missing.append(concept)
-
-            # If no data found for any concept, return empty DataFrame
-            if not concepts_found:
-                self.logger.warning(f"No fundamental data found for CIK {cik} ({symbol}) in {year}")
-                return pl.DataFrame()
-
-            # Log coverage statistics
-            self.logger.debug(
-                f"CIK {cik} ({symbol}): {len(concepts_found)}/{len(concepts)} concepts available "
-                f"({len(concepts_missing)} missing)"
-            )
-
-            # Aggregate data for the year (no forward-filling)
-            start_day = f"{year}-01-01"
-            end_day = f"{year}-12-31"
-            df = fund.collect_fields_raw(start_day, end_day, fields_dict)
-
-            # Convert timestamp to string for consistency and sort
-            if len(df) > 0 and 'timestamp' in df.columns:
-                df = df.with_columns(
-                    pl.col('timestamp').dt.strftime('%Y-%m-%d')
-                ).sort('timestamp')
-
-            if (
-                previous_row is not None
-                and len(previous_row) > 0
-                and len(df) > 0
-                and 'timestamp' in df.columns
-            ):
-                prev_row = previous_row
-                if prev_row.columns != df.columns:
-                    prev_row = prev_row.select(df.columns)
-                prev_ts = prev_row['timestamp'][-1]
-                first_ts = df['timestamp'][0]
-                if prev_ts < first_ts:
-                    df = pl.concat([prev_row.tail(1), df], how="vertical")
-
-            return df
-
-        except Exception as e:
-            self.logger.error(f"Failed to collect fundamental data for CIK {cik} ({symbol}) in {year}: {e}")
-            return pl.DataFrame()

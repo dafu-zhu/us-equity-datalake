@@ -280,7 +280,7 @@ uploader.upload_fundamental_year(full_df, symbol, year, path='derived/fundamenta
 ```python
 # File-based: read from disk, compute, write to disk
 calc = DerivedFundamental(symbol='AAPL', year=2024)
-calc.load_raw_data()  # reads data/raw/fundamental/AAPL/2024/fundamental.parquet
+calc.load_raw_data()  # reads data/raw/fundamental/AAPL/fundamental.parquet
 derived_df = calc.compute_all_derived()
 calc.save(derived_df)  # writes data/derived/fundamental/AAPL/2024/fundamental.parquet
 ```

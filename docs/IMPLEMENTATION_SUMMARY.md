@@ -196,9 +196,9 @@ For a single symbol (RKLB, CIK 0001819994, year 2024):
 
 ```python
 # Step 1: Upload raw fundamental
-app.upload_fundamental(2024)
+app.upload_fundamental(start_date="2024-01-01", end_date="2024-12-31")
 # → Fetches from SEC EDGAR
-# → Stores to: data/raw/fundamental/RKLB/2024/fundamental.parquet
+# → Stores to: data/raw/fundamental/RKLB/fundamental.parquet
 # → 32 columns: timestamp + 31 raw concepts
 
 # Step 2: Upload derived fundamental

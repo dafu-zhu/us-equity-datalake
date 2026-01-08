@@ -24,7 +24,6 @@ from storage.data_publishers import DataPublishers
 from collection.alpaca_ticks import Ticks
 from collection.crsp_ticks import CRSPDailyTicks
 from stock_pool.universe_manager import UniverseManager
-from derived.metrics import compute_derived
 
 load_dotenv()
 
@@ -87,10 +86,6 @@ class UploadApp:
             logger=self.logger,
             data_collectors=self.data_collectors
         )
-
-        # Thread-safe cache for previous rows (for shift-based metrics)
-        self._fundamental_prev_row: Dict[str, pl.DataFrame] = {}
-        self._fundamental_prev_row_lock = threading.Lock()
 
     # ===========================
     # Upload ticks
@@ -307,40 +302,42 @@ class UploadApp:
     def _process_symbol_fundamental(
             self,
             sym: str,
-            year: int,
+            start_date: str,
+            end_date: str,
             overwrite: bool = False,
             cik: Optional[str] = None
         ) -> dict:
         """
-        Process fundamental data for a single symbol for an entire year.
+        Process fundamental data for a single symbol for a date range.
         Uses concept-based extraction with approved_mapping.yaml.
         Returns dict with status for progress tracking.
 
-        Storage: data/raw/fundamental/{symbol}/{ASOF_YEAR}/fundamental.parquet
-        ASOF_YEAR is derived from the filing date (long format, no forward fill).
+        Storage: data/raw/fundamental/{symbol}/fundamental.parquet
+        Stored in long format, no forward fill.
 
         :param sym: Symbol in Alpaca format (e.g., 'BRK.B')
-        :param year: Year to fetch data for
+        :param start_date: Start date to fetch data for (YYYY-MM-DD)
+        :param end_date: End date to fetch data for (YYYY-MM-DD)
         :param overwrite: If True, skip existence check and overwrite existing data
         :param cik: Pre-fetched CIK (if None, will look up)
         """
-        # Validate: Check if data already exists (before collection)
-        if not overwrite and self.validator.data_exists(sym, 'fundamental', year):
-            return {
-                'symbol': sym,
-                'status': 'canceled',
-                'error': f'Symbol {sym} for {year} already exists'
-            }
+        if not overwrite and self.validator.data_exists(sym, 'fundamental'):
+            self.logger.info(
+                f"Fundamental data for {sym} already exists; "
+                "continuing to refresh requested date range."
+            )
 
         # Use CIKResolver if CIK not provided
         if cik is None:
-            reference_date = f"{year}-06-30"  # Mid-year reference
-            cik = self.cik_resolver.get_cik(sym, reference_date, year=year)
+            reference_year = int(end_date[:4])
+            reference_date = f"{reference_year}-06-30"
+            cik = self.cik_resolver.get_cik(sym, reference_date, year=reference_year)
 
         # Publish fundamental data using concept-based extraction
         return self.data_publishers.publish_fundamental(
             sym=sym,
-            year=year,
+            start_date=start_date,
+            end_date=end_date,
             cik=cik,
             sec_rate_limiter=self.sec_rate_limiter
         )
@@ -348,51 +345,58 @@ class UploadApp:
     def _process_symbol_ttm_fundamental(
             self,
             sym: str,
-            year: int,
+            start_date: str,
+            end_date: str,
             overwrite: bool = False,
             cik: Optional[str] = None
         ) -> dict:
         """
-        Process TTM fundamental data for a single symbol for an entire year.
+        Process TTM fundamental data for a single symbol for a date range.
         Computes TTM in-memory from long-format fundamentals.
 
         Storage:
-        - data/derived/features/fundamental/{symbol}/{ASOF_YEAR}/ttm.parquet (long)
-        - data/derived/features/fundamental/{symbol}/{ASOF_YEAR}/ttm_wide.parquet (wide)
-        ASOF_YEAR is derived from the filing date.
+        - data/derived/features/fundamental/{symbol}/ttm.parquet (long)
 
         :param sym: Symbol in Alpaca format (e.g., 'BRK.B')
-        :param year: Year to fetch data for
+        :param start_date: Start date to fetch data for (YYYY-MM-DD)
+        :param end_date: End date to fetch data for (YYYY-MM-DD)
         :param overwrite: If True, skip existence check and overwrite existing data
         :param cik: Pre-fetched CIK (if None, will look up)
         """
-        if not overwrite and self.validator.data_exists(sym, 'ttm', year, data_tier='derived'):
-            return {
-                'symbol': sym,
-                'status': 'canceled',
-                'error': f'TTM data for {sym} {year} already exists'
-            }
+        if not overwrite and self.validator.data_exists(sym, 'ttm', data_tier='derived'):
+            self.logger.info(
+                f"TTM data for {sym} already exists; "
+                "continuing to refresh requested date range."
+            )
 
         if cik is None:
-            reference_date = f"{year}-06-30"
-            cik = self.cik_resolver.get_cik(sym, reference_date, year=year)
+            reference_year = int(end_date[:4])
+            reference_date = f"{reference_year}-06-30"
+            cik = self.cik_resolver.get_cik(sym, reference_date, year=reference_year)
 
         return self.data_publishers.publish_ttm_fundamental(
             sym=sym,
-            year=year,
+            start_date=start_date,
+            end_date=end_date,
             cik=cik,
             sec_rate_limiter=self.sec_rate_limiter
         )
 
-    def upload_fundamental(self, year: int, max_workers: int = 50, overwrite: bool = False):
+    def upload_fundamental(
+        self,
+        start_date: str,
+        end_date: str,
+        max_workers: int = 50,
+        overwrite: bool = False
+    ):
         """
-        Upload fundamental data for all symbols for an entire year.
+        Upload fundamental data for all symbols for a date range.
         Uses concept-based extraction with approved_mapping.yaml.
 
-        Storage strategy: data/raw/fundamental/{symbol}/{ASOF_YEAR}/fundamental.parquet
-        - Stores all quarterly/annual filings by filing year (long format)
+        Storage strategy: data/raw/fundamental/{symbol}/fundamental.parquet
+        - Stores all quarterly/annual filings (long format)
         - No forward filling - only actual filed data
-        - One file per symbol per filing year
+        - One file per symbol
         - Uses all concepts from approved_mapping.yaml
 
         Performance optimizations:
@@ -401,24 +405,47 @@ class UploadApp:
         3. Increased worker pool (50 workers) - rate limiter controls actual request rate
         4. CIK caching for repeated use
 
-        :param year: Year to fetch data for
+        :param start_date: Start date (YYYY-MM-DD)
+        :param end_date: End date (YYYY-MM-DD)
         :param max_workers: Number of concurrent threads (default: 50, rate limited to 9.5 req/sec)
         :param overwrite: If True, overwrite existing data in S3 (default: False)
         """
         start_time = time.time()
+        start_year = int(start_date[:4])
+        end_year = int(end_date[:4])
 
-        # Load symbols for this year in Alpaca format
-        alpaca_symbols = self.universe_manager.load_symbols_for_year(year, sym_type='alpaca')
+        symbol_reference_year = {}
+        for year in range(start_year, end_year + 1):
+            symbols = self.universe_manager.load_symbols_for_year(year, sym_type='alpaca')
+            for sym in symbols:
+                if sym not in symbol_reference_year:
+                    symbol_reference_year[sym] = year
+
+        alpaca_symbols = list(symbol_reference_year.keys())
 
         total = len(alpaca_symbols)
-        self.logger.info(f"Starting {year} fundamental upload for {total} symbols with {max_workers} workers (rate limited to 9.5 req/sec)")
+        self.logger.info(
+            f"Starting fundamental upload for {total} symbols "
+            f"from {start_date} to {end_date} with {max_workers} workers "
+            f"(rate limited to 9.5 req/sec)"
+        )
         self.logger.info(f"Using concept-based extraction with approved_mapping.yaml")
-        self.logger.info("Storage: data/raw/fundamental/{symbol}/{ASOF_YEAR}/fundamental.parquet")
+        self.logger.info("Storage: data/raw/fundamental/{symbol}/fundamental.parquet")
 
         # OPTIMIZATION: Batch pre-fetch all CIKs before starting (avoids per-symbol DB queries)
-        self.logger.info(f"Step 1/3: Pre-fetching CIKs for {total} symbols...")
+        self.logger.info(f"Step 1/3: Pre-fetching CIKs for {total} symbols across {start_year}-{end_year}...")
         prefetch_start = time.time()
-        cik_map = self.cik_resolver.batch_prefetch_ciks(alpaca_symbols, year, batch_size=100)
+        cik_map = {}
+        for year in range(start_year, end_year + 1):
+            year_symbols = [
+                sym for sym, ref_year in symbol_reference_year.items()
+                if ref_year == year
+            ]
+            if not year_symbols:
+                continue
+            cik_map.update(
+                self.cik_resolver.batch_prefetch_ciks(year_symbols, year, batch_size=100)
+            )
         prefetch_time = time.time() - prefetch_start
         self.logger.info(f"CIK pre-fetch completed in {prefetch_time:.1f}s ({total/prefetch_time:.1f} symbols/sec)")
 
@@ -447,7 +474,10 @@ class UploadApp:
         # Update total to reflect only symbols we'll process
         total = len(symbols_with_cik)
         if total == 0:
-            self.logger.warning(f"No symbols with CIKs found for {year}, skipping fundamental upload")
+            self.logger.warning(
+                f"No symbols with CIKs found between {start_date} and {end_date}, "
+                "skipping fundamental upload"
+            )
             return
 
         # Statistics
@@ -469,7 +499,8 @@ class UploadApp:
                 executor.submit(
                     self._process_symbol_fundamental,
                     sym,
-                    year,
+                    start_date,
+                    end_date,
                     overwrite,
                     cik_map.get(sym)  # Pass pre-fetched CIK (guaranteed non-NULL)
                 ): sym
@@ -512,7 +543,7 @@ class UploadApp:
         avg_rate = completed / fetch_time if fetch_time > 0 else 0
 
         self.logger.info(
-            f"Fundamental upload for {year} completed in {total_time:.1f}s: "
+            f"Fundamental upload for {start_date} to {end_date} completed in {total_time:.1f}s: "
             f"{success} success, {failed} failed, {canceled} canceled, {skipped} skipped out of {total} total"
         )
         self.logger.info(
@@ -561,32 +592,54 @@ class UploadApp:
 
             self.logger.info(f"{'='*80}\n")
 
-    def upload_ttm_fundamental(self, year: int, max_workers: int = 50, overwrite: bool = False):
+    def upload_ttm_fundamental(
+        self,
+        start_date: str,
+        end_date: str,
+        max_workers: int = 50,
+        overwrite: bool = False
+    ):
         """
-        Upload TTM fundamental data for all symbols for an entire year.
+        Upload TTM fundamental data for all symbols for a date range.
 
-        Storage: data/derived/features/fundamental/{symbol}/{ASOF_YEAR}/ttm.parquet
+        Storage: data/derived/features/fundamental/{symbol}/ttm.parquet
         - Computes TTM in memory from long-format fundamentals
-        - One file per symbol per filing year
-
-        Storage: data/derived/features/fundamental/{symbol}/{ASOF_YEAR}/ttm_wide.parquet
-        - Convert long-format TTM to wide-format
+        - One file per symbol
         """
         start_time = time.time()
+        start_year = int(start_date[:4])
+        end_year = int(end_date[:4])
 
-        alpaca_symbols = self.universe_manager.load_symbols_for_year(year, sym_type='alpaca')
+        symbol_reference_year = {}
+        for year in range(start_year, end_year + 1):
+            symbols = self.universe_manager.load_symbols_for_year(year, sym_type='alpaca')
+            for sym in symbols:
+                if sym not in symbol_reference_year:
+                    symbol_reference_year[sym] = year
+
+        alpaca_symbols = list(symbol_reference_year.keys())
 
         total = len(alpaca_symbols)
         self.logger.info(
-            f"Starting {year} TTM fundamental upload for {total} symbols with {max_workers} workers "
+            f"Starting TTM fundamental upload for {total} symbols "
+            f"from {start_date} to {end_date} with {max_workers} workers "
             f"(rate limited to 9.5 req/sec)"
         )
-        self.logger.info("Storage: data/derived/features/fundamental/{symbol}/{ASOF_YEAR}/ttm.parquet (long)")
-        self.logger.info("Storage: data/derived/features/fundamental/{symbol}/{ASOF_YEAR}/ttm_wide.parquet (wide)")
+        self.logger.info("Storage: data/derived/features/fundamental/{symbol}/ttm.parquet (long)")
 
         self.logger.info(f"Step 1/3: Pre-fetching CIKs for {total} symbols...")
         prefetch_start = time.time()
-        cik_map = self.cik_resolver.batch_prefetch_ciks(alpaca_symbols, year, batch_size=100)
+        cik_map = {}
+        for year in range(start_year, end_year + 1):
+            year_symbols = [
+                sym for sym, ref_year in symbol_reference_year.items()
+                if ref_year == year
+            ]
+            if not year_symbols:
+                continue
+            cik_map.update(
+                self.cik_resolver.batch_prefetch_ciks(year_symbols, year, batch_size=100)
+            )
         prefetch_time = time.time() - prefetch_start
         self.logger.info(f"CIK pre-fetch completed in {prefetch_time:.1f}s ({total/prefetch_time:.1f} symbols/sec)")
 
@@ -610,7 +663,9 @@ class UploadApp:
 
         total = len(symbols_with_cik)
         if total == 0:
-            self.logger.warning(f"No symbols with CIKs found for {year}, skipping TTM upload")
+            self.logger.warning(
+                f"No symbols with CIKs found between {start_date} and {end_date}, skipping TTM upload"
+            )
             return
 
         completed = 0
@@ -629,7 +684,8 @@ class UploadApp:
                 executor.submit(
                     self._process_symbol_ttm_fundamental,
                     sym,
-                    year,
+                    start_date,
+                    end_date,
                     overwrite,
                     cik_map.get(sym)
                 ): sym
@@ -668,7 +724,7 @@ class UploadApp:
         avg_rate = completed / fetch_time if fetch_time > 0 else 0
 
         self.logger.info(
-            f"TTM upload for {year} completed in {total_time:.1f}s: "
+            f"TTM upload for {start_date} to {end_date} completed in {total_time:.1f}s: "
             f"{success} success, {failed} failed, {canceled} canceled, {skipped} skipped out of {total} total"
         )
         self.logger.info(
@@ -682,38 +738,40 @@ class UploadApp:
     def _process_symbol_derived_fundamental(
             self,
             sym: str,
-            year: int,
+            start_date: str,
+            end_date: str,
             overwrite: bool = False,
             cik: Optional[str] = None
         ) -> dict:
         """
-        Process derived fundamental data for a single symbol for an entire year.
+        Process derived fundamental data for a single symbol for a date range.
 
         Workflow:
-        1. Collect TTM wide fundamental data
+        1. Collect TTM fundamental data (long format)
         2. Compute derived metrics
         3. Publish derived data separately
 
-        Storage: data/derived/features/fundamental/{symbol}/{YYYY}/metrics.parquet
+        Storage: data/derived/features/fundamental/{symbol}/metrics.parquet
         Contains ONLY derived metrics (keys + 24 derived columns).
 
         :param sym: Symbol in Alpaca format (e.g., 'BRK.B')
-        :param year: Year to fetch data for
+        :param start_date: Start date to fetch data for (YYYY-MM-DD)
+        :param end_date: End date to fetch data for (YYYY-MM-DD)
         :param overwrite: If True, skip existence check and overwrite existing data
         :param cik: Pre-fetched CIK (if None, will look up)
         """
         # Validate: Check if derived data already exists
-        if not overwrite and self.validator.data_exists(sym, 'fundamental', year, data_tier='derived'):
-            return {
-                'symbol': sym,
-                'status': 'canceled',
-                'error': f'Derived fundamental for {sym} {year} already exists'
-            }
+        if not overwrite and self.validator.data_exists(sym, 'fundamental', data_tier='derived'):
+            self.logger.info(
+                f"Derived metrics for {sym} already exists; "
+                "continuing to refresh requested date range."
+            )
 
         # Use CIKResolver if CIK not provided
         if cik is None:
-            reference_date = f"{year}-06-30"  # Mid-year reference
-            cik = self.cik_resolver.get_cik(sym, reference_date, year=year)
+            reference_year = int(end_date[:4])
+            reference_date = f"{reference_year}-06-30"
+            cik = self.cik_resolver.get_cik(sym, reference_date, year=reference_year)
 
         if cik is None:
             return {
@@ -723,58 +781,17 @@ class UploadApp:
                 'error': f'No CIK found for {sym}'
             }
 
-        # Step 1: Collect TTM wide fundamental data (in-memory)
-        # Note: Rate limiting now happens inside SECClient.fetch_company_facts
-        with self._fundamental_prev_row_lock:
-            prev_row = self._fundamental_prev_row.get(sym)
-
-        self.logger.debug(f"{sym}: Collecting metrics inputs for {year}")
-        raw_df = self.data_collectors.collect_metrics_wide(
+        # Step 1: Collect derived metrics (long format, in-memory)
+        self.logger.debug(f"{sym}: Collecting derived metrics for {start_date} to {end_date}")
+        derived_df = self.data_collectors.collect_derived_long(
             cik=cik,
-            year=year,
+            start_date=start_date,
+            end_date=end_date,
             symbol=sym
         )
-        if prev_row is not None and len(prev_row) > 0 and len(raw_df) > 0:
-            missing_in_prev = [c for c in raw_df.columns if c not in prev_row.columns]
-            if missing_in_prev:
-                prev_row = prev_row.with_columns([pl.lit(None).alias(c) for c in missing_in_prev])
-            missing_in_raw = [c for c in prev_row.columns if c not in raw_df.columns]
-            if missing_in_raw:
-                raw_df = raw_df.with_columns([pl.lit(None).alias(c) for c in missing_in_raw])
-
-            prev_row = prev_row.select(raw_df.columns)
-            prev_ts = prev_row['as_of_date'][-1]
-            first_ts = raw_df['as_of_date'][0]
-            if prev_ts < first_ts:
-                raw_df = pl.concat([prev_row.tail(1), raw_df], how="vertical")
-
-        if len(raw_df) == 0:
-            self.logger.debug(f"{sym}: No TTM fundamental data found for {year}")
-            return {
-                'symbol': sym,
-                'cik': cik,
-                'status': 'skipped',
-                'error': f'No TTM fundamental data found'
-            }
-
-        # Track whether we prepended a previous row for shift-based metrics
-        used_prev_row = (
-            prev_row is not None
-            and len(prev_row) > 0
-            and len(raw_df) > 0
-            and 'as_of_date' in raw_df.columns
-            and raw_df['as_of_date'][0] == prev_row['as_of_date'][-1]
-        )
-
-        # Step 2: Compute derived metrics (in-memory)
-        self.logger.debug(f"{sym}: Computing derived metrics for {year}")
-        derived_df = compute_derived(raw_df, logger=self.logger, symbol=sym)
-
-        if used_prev_row and len(derived_df) > 0:
-            derived_df = derived_df.slice(1)
 
         if len(derived_df) == 0:
-            self.logger.debug(f"{sym}: Derived metrics empty for {year}")
+            self.logger.debug(f"{sym}: Derived metrics empty for {start_date} to {end_date}")
             return {
                 'symbol': sym,
                 'cik': cik,
@@ -782,49 +799,74 @@ class UploadApp:
                 'error': f'Failed to compute derived metrics'
             }
 
-        if len(raw_df) > 0:
-            with self._fundamental_prev_row_lock:
-                self._fundamental_prev_row[sym] = raw_df.tail(1)
-
         # Step 3: Publish derived data (separate from raw)
-        self.logger.debug(f"{sym}: Publishing derived metrics for {year}")
+        self.logger.debug(f"{sym}: Publishing derived metrics for {start_date} to {end_date}")
         return self.data_publishers.publish_derived_fundamental(
             sym=sym,
-            year=year,
+            start_date=start_date,
+            end_date=end_date,
             derived_df=derived_df
         )
 
-    def upload_derived_fundamental(self, year: int, max_workers: int = 50, overwrite: bool = False):
+    def upload_derived_fundamental(
+        self,
+        start_date: str,
+        end_date: str,
+        max_workers: int = 50,
+        overwrite: bool = False
+    ):
         """
-        Upload derived fundamental data for all symbols for an entire year.
+        Upload derived fundamental data for all symbols for a date range.
 
         Workflow for each symbol:
-        1. Collect TTM wide fundamental data
+        1. Collect TTM fundamental data (long format)
         2. Compute 24 derived metrics
         3. Store derived data separately
 
         Storage strategy:
-        - Raw: data/raw/fundamental/{symbol}/{ASOF_YEAR}/fundamental.parquet (long format)
-        - TTM: data/derived/features/fundamental/{symbol}/{ASOF_YEAR}/ttm_wide.parquet (wide format)
-        - Derived: data/derived/features/fundamental/{symbol}/{YYYY}/metrics.parquet (keys + 24 derived)
+        - Raw: data/raw/fundamental/{symbol}/fundamental.parquet (long format)
+        - TTM: data/derived/features/fundamental/{symbol}/ttm.parquet (long format)
+        - Derived: data/derived/features/fundamental/{symbol}/metrics.parquet (keys + 24 derived)
 
-        :param year: Year to fetch data for
+        :param start_date: Start date (YYYY-MM-DD)
+        :param end_date: End date (YYYY-MM-DD)
         :param max_workers: Number of concurrent threads (default: 50, rate limited to 9.5 req/sec)
         :param overwrite: If True, overwrite existing data in S3 (default: False)
         """
         start_time = time.time()
+        start_year = int(start_date[:4])
+        end_year = int(end_date[:4])
 
-        # Load symbols for this year
-        alpaca_symbols = self.universe_manager.load_symbols_for_year(year, sym_type='alpaca')
+        symbol_reference_year = {}
+        for year in range(start_year, end_year + 1):
+            symbols = self.universe_manager.load_symbols_for_year(year, sym_type='alpaca')
+            for sym in symbols:
+                if sym not in symbol_reference_year:
+                    symbol_reference_year[sym] = year
+
+        alpaca_symbols = list(symbol_reference_year.keys())
 
         total = len(alpaca_symbols)
-        self.logger.info(f"Starting {year} derived fundamental upload for {total} symbols with {max_workers} workers")
-        self.logger.info(f"Storage: data/derived/features/fundamental/{{symbol}}/{year}/metrics.parquet")
+        self.logger.info(
+            f"Starting derived fundamental upload for {total} symbols "
+            f"from {start_date} to {end_date} with {max_workers} workers"
+        )
+        self.logger.info("Storage: data/derived/features/fundamental/{symbol}/metrics.parquet")
 
         # OPTIMIZATION: Batch pre-fetch all CIKs
         self.logger.info(f"Step 1/3: Pre-fetching CIKs for {total} symbols...")
         prefetch_start = time.time()
-        cik_map = self.cik_resolver.batch_prefetch_ciks(alpaca_symbols, year, batch_size=100)
+        cik_map = {}
+        for year in range(start_year, end_year + 1):
+            year_symbols = [
+                sym for sym, ref_year in symbol_reference_year.items()
+                if ref_year == year
+            ]
+            if not year_symbols:
+                continue
+            cik_map.update(
+                self.cik_resolver.batch_prefetch_ciks(year_symbols, year, batch_size=100)
+            )
         prefetch_time = time.time() - prefetch_start
         self.logger.info(f"CIK pre-fetch completed in {prefetch_time:.1f}s")
 
@@ -841,7 +883,9 @@ class UploadApp:
         # Update total
         total = len(symbols_with_cik)
         if total == 0:
-            self.logger.warning(f"No symbols with CIKs found for {year}, skipping derived upload")
+            self.logger.warning(
+                f"No symbols with CIKs found between {start_date} and {end_date}, skipping derived upload"
+            )
             return
 
         # Statistics
@@ -860,7 +904,8 @@ class UploadApp:
                 executor.submit(
                     self._process_symbol_derived_fundamental,
                     sym,
-                    year,
+                    start_date,
+                    end_date,
                     overwrite,
                     cik_map.get(sym)
                 ): sym
@@ -897,7 +942,7 @@ class UploadApp:
         avg_rate = completed / fetch_time if fetch_time > 0 else 0
 
         self.logger.info(
-            f"Derived fundamental upload for {year} completed in {total_time:.1f}s: "
+            f"Derived fundamental upload for {start_date} to {end_date} completed in {total_time:.1f}s: "
             f"{success} success, {failed} failed, {canceled} canceled, {skipped} skipped out of {total} total"
         )
         self.logger.info(
@@ -924,10 +969,9 @@ class UploadApp:
         Run the complete workflow, fetch and upload fundamental, daily ticks and minute ticks data within the period
 
         Storage strategy:
-        - Raw Fundamental: Once per filing year -> data/raw/fundamental/{symbol}/{ASOF_YEAR}/fundamental.parquet
-        - Derived Fundamental: Once per year -> data/derived/features/fundamental/{symbol}/{YYYY}/metrics.parquet
-        - TTM Fundamental: Once per filing year -> data/derived/features/fundamental/{symbol}/{ASOF_YEAR}/ttm.parquet (long)
-        - TTM Fundamental: Once per filing year -> data/derived/features/fundamental/{symbol}/{ASOF_YEAR}/ttm_wide.parquet (wide)
+        - Raw Fundamental: Once per symbol -> data/raw/fundamental/{symbol}/fundamental.parquet
+        - Derived Fundamental: Once per symbol -> data/derived/features/fundamental/{symbol}/metrics.parquet
+        - TTM Fundamental: Once per symbol -> data/derived/features/fundamental/{symbol}/ttm.parquet (long)
         - Daily ticks: Once per year -> data/raw/ticks/daily/{symbol}/{YYYY}/ticks.parquet
         - Minute ticks: Monthly -> data/raw/ticks/minute/{symbol}/{YYYY}/{MM}/{DD}/ticks.parquet
 
@@ -944,20 +988,31 @@ class UploadApp:
         :param run_minute_ticks: If True, upload minute ticks data (all months for each year)
         :param run_top_3000: If True, upload the 3000 most liquid stock list
         """
+        start_date = f"{start_year}-01-01"
+        end_date = f"{end_year}-12-31"
+
+        if run_fundamental:
+            self.logger.info(
+                f"Uploading raw fundamental data for {start_date} to {end_date} "
+                "(filing-year, long format)"
+            )
+            self.upload_fundamental(start_date, end_date, max_workers, overwrite)
+
+        if run_derived_fundamental:
+            self.logger.info(
+                f"Uploading derived fundamental data for {start_date} to {end_date}"
+            )
+            self.upload_derived_fundamental(start_date, end_date, max_workers, 
+            overwrite)
+        
+        if run_ttm_fundamental:
+            self.logger.info(
+                f"Uploading TTM fundamental data for {start_date} to {end_date}"
+            )
+            self.upload_ttm_fundamental(start_date, end_date, max_workers, overwrite)
+        
         for year in range(start_year, end_year + 1):
             self.logger.info(f"Processing year {year}")
-
-            if run_fundamental:
-                self.logger.info(f"Uploading raw fundamental data for {year} (filing-year, long format)")
-                self.upload_fundamental(year, max_workers, overwrite)
-
-            if run_derived_fundamental:
-                self.logger.info(f"Uploading derived fundamental data for {year} (year-based)")
-                self.upload_derived_fundamental(year, max_workers, overwrite)
-
-            if run_ttm_fundamental:
-                self.logger.info(f"Uploading TTM fundamental data for {year} (filing-year)")
-                self.upload_ttm_fundamental(year, max_workers, overwrite)
 
             if run_daily_ticks:
                 self.logger.info(f"Uploading daily ticks for {year} (year-based, all trading days)")
@@ -1057,6 +1112,6 @@ if __name__ == "__main__":
     app = UploadApp()
     try:
         # Example: Run from 2010 to 2025 (yearly processing)
-        app.run(start_year=2024, end_year=2025, overwrite=True, run_fundamental=False, run_derived_fundamental=True, run_ttm_fundamental=False)
+        app.run(start_year=2010, end_year=2025, overwrite=True, run_fundamental=True, run_derived_fundamental=True, run_ttm_fundamental=True)
     finally:
         app.close()

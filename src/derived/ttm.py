@@ -125,7 +125,6 @@ def compute_ttm_long(
                     "value": ttm_value,
                     "start": ttm_start.isoformat(),
                     "end": last_four[-1].isoformat(),
-                    "ttm_period_end": last_four[-1].isoformat(),
                     "fp": "TTM",
                 }
             )
