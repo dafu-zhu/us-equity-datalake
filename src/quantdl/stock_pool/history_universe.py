@@ -4,24 +4,11 @@ from pathlib import Path
 from typing import Optional
 import wrds
 import os
-import re
 from dotenv import load_dotenv
 from quantdl.master.security_master import SymbolNormalizer, SecurityMaster
+from quantdl.utils.validation import validate_date_string, validate_year, validate_month
 
 load_dotenv()
-
-
-def validate_date_string(date_str: str) -> str:
-    """
-    Validate and sanitize date string to prevent SQL injection.
-
-    :param date_str: Date string in 'YYYY-MM-DD' format
-    :return: Validated date string
-    :raises ValueError: If date string is invalid
-    """
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
-        raise ValueError(f"Invalid date format: {date_str}. Expected YYYY-MM-DD")
-    return date_str
 
 
 def get_hist_universe_crsp(year: int, month: int, db: Optional[wrds.Connection] = None) -> pl.DataFrame:
@@ -47,12 +34,10 @@ def get_hist_universe_crsp(year: int, month: int, db: Optional[wrds.Connection] 
     try:
         # Use end-of-month as "as of" date
         # Validate year and month to ensure they are integers within valid ranges
-        if not isinstance(year, int) or year < 1900 or year > 2100:
-            raise ValueError(f"Invalid year: {year}. Must be an integer between 1900 and 2100")
-        if not isinstance(month, int) or month < 1 or month > 12:
-            raise ValueError(f"Invalid month: {month}. Must be an integer between 1 and 12")
+        validated_year = validate_year(year)
+        validated_month = validate_month(month)
 
-        asof = f"{year}-{month:02d}-28"
+        asof = f"{validated_year}-{validated_month:02d}-28"
         validated_asof = validate_date_string(asof)
 
         sql = f"""

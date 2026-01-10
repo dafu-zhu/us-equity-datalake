@@ -14,43 +14,10 @@ from pathlib import Path
 from quantdl.master.security_master import SecurityMaster
 from quantdl.utils.logger import setup_logger
 from quantdl.utils.mapping import align_calendar
+from quantdl.utils.validation import validate_date_string, validate_permno
 import logging
-import re
 
 load_dotenv()
-
-
-def validate_date_string(date_str: str) -> str:
-    """
-    Validate and sanitize date string to prevent SQL injection.
-
-    :param date_str: Date string in 'YYYY-MM-DD' format
-    :return: Validated date string
-    :raises ValueError: If date string is invalid
-    """
-    if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
-        raise ValueError(f"Invalid date format: {date_str}. Expected YYYY-MM-DD")
-
-    # Also validate it's a valid date
-    try:
-        dt.datetime.strptime(date_str, '%Y-%m-%d')
-    except ValueError as e:
-        raise ValueError(f"Invalid date value: {date_str}. {e}")
-
-    return date_str
-
-
-def validate_permno(permno: int) -> int:
-    """
-    Validate permno to ensure it's a positive integer.
-
-    :param permno: CRSP permanent number
-    :return: Validated permno
-    :raises ValueError: If permno is invalid
-    """
-    if not isinstance(permno, int) or permno <= 0:
-        raise ValueError(f"Invalid permno: {permno}. Must be a positive integer")
-    return permno
 
 
 class CRSPDailyTicks:
