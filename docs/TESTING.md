@@ -204,20 +204,24 @@ This document provides comprehensive documentation for the test suite of the US 
 
 ### Prerequisites
 
-```bash
-# Install test dependencies
-pip install -r requirements-test.txt
+This project uses [uv](https://github.com/astral-sh/uv) for fast Python package management.
 
-# Or install main dependencies plus test dependencies
-pip install -r requirements.txt
-pip install -r requirements-test.txt
+```bash
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Sync all dependencies (including test dependencies)
+uv sync --all-extras
+
+# Or install test dependencies only
+uv pip install -r requirements-test.txt
 ```
 
 ### Quick Start
 
 ```bash
 # Run all tests
-pytest
+uv run pytest
 
 # Run with the test runner script
 ./run_tests.sh
@@ -234,25 +238,25 @@ pytest
 
 ```bash
 # Run all unit tests
-pytest -m unit
+uv run pytest -m unit
 
 # Run specific test file
-pytest tests/unit/derived/test_metrics.py
+uv run pytest tests/unit/derived/test_metrics.py
 
 # Run specific test class
-pytest tests/unit/collection/test_models.py::TestTickField
+uv run pytest tests/unit/collection/test_models.py::TestTickField
 
 # Run specific test
-pytest tests/unit/storage/test_rate_limiter.py::TestRateLimiter::test_thread_safety
+uv run pytest tests/unit/storage/test_rate_limiter.py::TestRateLimiter::test_thread_safety
 
 # Run with verbose output
-pytest -vv
+uv run pytest -vv
 
 # Run with coverage
-pytest --cov=src/quantdl --cov-report=html
+uv run pytest --cov=src/quantdl --cov-report=html
 
-# Run in parallel (faster)
-pytest -n auto
+# Run in parallel (faster, requires pytest-xdist)
+uv run pytest -n auto
 ```
 
 ## Test Design Principles
@@ -379,10 +383,16 @@ Tests should be integrated into CI/CD pipeline:
 
 ```yaml
 # Example GitHub Actions workflow
+- name: Install uv
+  uses: astral-sh/setup-uv@v3
+  with:
+    version: "latest"
+
+- name: Install dependencies
+  run: uv sync --all-extras
+
 - name: Run Tests
-  run: |
-    pip install -r requirements-test.txt
-    pytest -m unit --cov=src/quantdl --cov-report=xml
+  run: uv run pytest -m unit --cov=src/quantdl --cov-report=xml
 
 - name: Upload Coverage
   uses: codecov/codecov-action@v3

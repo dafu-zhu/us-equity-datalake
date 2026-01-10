@@ -2,6 +2,18 @@
 
 This directory contains comprehensive unit and integration tests for the US Equity Data Lake project.
 
+## Prerequisites
+
+This project uses [uv](https://github.com/astral-sh/uv) for fast Python package management.
+
+```bash
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Sync dependencies (including test dependencies)
+uv sync --all-extras
+```
+
 ## Test Structure
 
 ```
@@ -31,6 +43,12 @@ tests/
 ### Run All Tests
 
 ```bash
+# Using uv
+uv run pytest
+
+# Or activate the virtual environment first
+source .venv/bin/activate  # On Unix/macOS
+# .venv\Scripts\activate   # On Windows
 pytest
 ```
 
@@ -38,37 +56,38 @@ pytest
 
 ```bash
 # Unit tests only (fast)
-pytest -m unit
+uv run pytest -m unit
 
 # Integration tests only (slower)
-pytest -m integration
+uv run pytest -m integration
 
 # Specific module
-pytest tests/unit/collection/
-pytest tests/unit/derived/test_metrics.py
+uv run pytest tests/unit/collection/
+uv run pytest tests/unit/derived/test_metrics.py
 
 # Specific test function
-pytest tests/unit/storage/test_rate_limiter.py::TestRateLimiter::test_thread_safety
+uv run pytest tests/unit/storage/test_rate_limiter.py::TestRateLimiter::test_thread_safety
 ```
 
 ### Run with Coverage
 
 ```bash
 # Generate coverage report
-pytest --cov=src/quantdl --cov-report=html
+uv run pytest --cov=src/quantdl --cov-report=html
 
 # View coverage report
-open htmlcov/index.html
+open htmlcov/index.html  # macOS
+xdg-open htmlcov/index.html  # Linux
 ```
 
 ### Run Tests in Parallel
 
 ```bash
-# Install pytest-xdist
-pip install pytest-xdist
+# Install pytest-xdist (if not already in pyproject.toml)
+uv add --dev pytest-xdist
 
 # Run tests in parallel
-pytest -n auto
+uv run pytest -n auto
 ```
 
 ## Test Markers
@@ -191,23 +210,36 @@ Tests run automatically on:
 
 ```bash
 # Clear pytest cache
-pytest --cache-clear
+uv run pytest --cache-clear
 
 # Run in verbose mode
-pytest -vv
+uv run pytest -vv
 
 # Show print statements
-pytest -s
+uv run pytest -s
 ```
 
 ### Import Errors
 
 ```bash
-# Install package in development mode
-pip install -e .
+# Sync dependencies to ensure everything is installed
+uv sync
+
+# Or install package in development mode
+uv pip install -e .
 
 # Or add to PYTHONPATH
 export PYTHONPATH=/path/to/us-equity-datalake/src:$PYTHONPATH
+```
+
+### Missing Test Dependencies
+
+```bash
+# Install test dependencies
+uv pip install -r requirements-test.txt
+
+# Or add them to pyproject.toml dev dependencies
+uv add --dev pytest pytest-cov pytest-xdist pytest-mock
 ```
 
 ### Fixture Not Found

@@ -2,6 +2,9 @@
 
 # Test runner script for US Equity Data Lake
 # Usage: ./run_tests.sh [options]
+#
+# This script uses uv for package management and test execution.
+# Make sure uv is installed: curl -LsSf https://astral.sh/uv/install.sh | sh
 
 set -e  # Exit on error
 
@@ -14,6 +17,17 @@ NC='\033[0m' # No Color
 echo -e "${GREEN}US Equity Data Lake Test Suite${NC}"
 echo "=================================="
 echo ""
+
+# Check if uv is installed
+if ! command -v uv &> /dev/null; then
+    echo -e "${YELLOW}Warning: uv not found. Install with:${NC}"
+    echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"
+    echo ""
+    echo -e "${YELLOW}Falling back to system pytest...${NC}"
+    USE_UV=false
+else
+    USE_UV=true
+fi
 
 # Parse command line arguments
 TEST_TYPE="all"
@@ -62,22 +76,29 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Set PYTHONPATH
+# Set PYTHONPATH (for fallback mode)
 export PYTHONPATH="${PWD}/src:${PYTHONPATH}"
+
+# Determine pytest command
+if [ "$USE_UV" = true ]; then
+    PYTEST_CMD="uv run pytest"
+else
+    PYTEST_CMD="pytest"
+fi
 
 # Run tests based on type
 case $TEST_TYPE in
     unit)
         echo -e "${YELLOW}Running unit tests...${NC}"
-        pytest -m unit $VERBOSE $COVERAGE tests/unit/
+        $PYTEST_CMD -m unit $VERBOSE $COVERAGE tests/unit/
         ;;
     integration)
         echo -e "${YELLOW}Running integration tests...${NC}"
-        pytest -m integration $VERBOSE $COVERAGE tests/integration/
+        $PYTEST_CMD -m integration $VERBOSE $COVERAGE tests/integration/
         ;;
     all)
         echo -e "${YELLOW}Running all tests...${NC}"
-        pytest $VERBOSE $COVERAGE tests/
+        $PYTEST_CMD $VERBOSE $COVERAGE tests/
         ;;
 esac
 
