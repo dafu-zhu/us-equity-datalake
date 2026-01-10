@@ -63,3 +63,25 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "external: mark test as requiring external API access"
     )
+
+def pytest_collection_modifyitems(config, items):
+    """
+    Auto-apply markers based on test file location.
+
+    Convention:
+      - tests/unit/**         => @pytest.mark.unit
+      - tests/integration/**  => @pytest.mark.integration
+    """
+    root = Path(str(config.rootpath)).resolve()
+
+    unit_dir = (root / "tests" / "unit").resolve()
+    integration_dir = (root / "tests" / "integration").resolve()
+
+    for item in items:
+        p = Path(str(item.fspath)).resolve()
+
+        if unit_dir in p.parents:
+            item.add_marker(pytest.mark.unit)
+
+        if integration_dir in p.parents:
+            item.add_marker(pytest.mark.integration)

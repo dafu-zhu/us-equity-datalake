@@ -2,6 +2,7 @@
 Integration tests for data collection workflows
 Tests end-to-end data collection scenarios with mocked external services
 """
+import io
 import pytest
 import polars as pl
 import datetime as dt
@@ -79,7 +80,9 @@ class TestDataCollectionWorkflow:
         # Step 4: Mock S3 upload
         # In real workflow, this would be handled by data_publishers
         s3_key = 'data/raw/ticks/daily/AAPL/2024/ticks.parquet'
-        buffer = fetched_data.write_parquet()
+        parquet_buffer = io.BytesIO()
+        fetched_data.write_parquet(parquet_buffer)
+        buffer = parquet_buffer.getvalue()
 
         mock_s3_client.put_object(
             Bucket='test-bucket',
@@ -115,7 +118,9 @@ class TestDataCollectionWorkflow:
 
         # Step 4: Mock S3 upload
         s3_key = 'data/raw/fundamental/AAPL/fundamental.parquet'
-        buffer = raw_data.write_parquet()
+        parquet_buffer = io.BytesIO()
+        raw_data.write_parquet(parquet_buffer)
+        buffer = parquet_buffer.getvalue()
 
         mock_s3_client.put_object(
             Bucket='test-bucket',
@@ -338,11 +343,13 @@ class TestDataStorageWorkflow:
         })
 
         # Serialize to Parquet
-        buffer = original_data.write_parquet()
+        parquet_buffer = io.BytesIO()
+        original_data.write_parquet(parquet_buffer)
+        buffer = parquet_buffer.getvalue()
         assert len(buffer) > 0
 
         # Deserialize
-        restored_data = pl.read_parquet(buffer)
+        restored_data = pl.read_parquet(io.BytesIO(buffer))
 
         # Verify data integrity
         assert original_data.shape == restored_data.shape
@@ -383,7 +390,9 @@ class TestDataStorageWorkflow:
         for symbol, data in files_to_upload:
             # Mock upload process
             s3_key = f"data/raw/ticks/daily/{symbol}/2024/ticks.parquet"
-            buffer = data.write_parquet()
+            parquet_buffer = io.BytesIO()
+            data.write_parquet(parquet_buffer)
+            buffer = parquet_buffer.getvalue()
 
             # Simulate successful upload
             upload_results.append({

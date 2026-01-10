@@ -123,10 +123,9 @@ class TestS3ClientIntegration:
             temp_path = f.name
 
         try:
-            client = S3Client(config_path=temp_path)
-            # Creating boto config should raise ValueError
+            # Creating the client should raise because boto config is built in __init__
             with pytest.raises(ValueError, match="Client configuration is empty"):
-                _ = client.boto_config
+                S3Client(config_path=temp_path)
         finally:
             Path(temp_path).unlink(missing_ok=True)
 
@@ -158,7 +157,7 @@ class TestValidatorIntegration:
 
         assert validator.bucket_name == 'custom-bucket'
 
-    def test_list_files_under_prefix(self, mock_s3_client):
+    def test_list_files_under_prefix(self, mock_s3_client, mock_env_vars):
         """Test listing files under S3 prefix"""
         # Mock S3 response
         mock_s3_client.list_objects_v2.return_value = {
@@ -219,7 +218,7 @@ class TestValidatorIntegration:
 
         assert len(files) == 0
 
-    def test_data_exists_daily_ticks(self, mock_s3_client):
+    def test_data_exists_daily_ticks(self, mock_s3_client, mock_env_vars):
         """Test checking existence of daily ticks data"""
         mock_s3_client.head_object.return_value = {}
 
@@ -232,7 +231,7 @@ class TestValidatorIntegration:
             Key='data/raw/ticks/daily/AAPL/2024/ticks.parquet'
         )
 
-    def test_data_exists_minute_ticks(self, mock_s3_client):
+    def test_data_exists_minute_ticks(self, mock_s3_client, mock_env_vars):
         """Test checking existence of minute ticks data"""
         mock_s3_client.head_object.return_value = {}
 
@@ -245,7 +244,7 @@ class TestValidatorIntegration:
             Key='data/raw/ticks/minute/AAPL/2024/06/15/ticks.parquet'
         )
 
-    def test_data_exists_fundamental(self, mock_s3_client):
+    def test_data_exists_fundamental(self, mock_s3_client, mock_env_vars):
         """Test checking existence of fundamental data"""
         mock_s3_client.head_object.return_value = {}
 
@@ -258,7 +257,7 @@ class TestValidatorIntegration:
             Key='data/raw/fundamental/AAPL/fundamental.parquet'
         )
 
-    def test_data_exists_derived_fundamental(self, mock_s3_client):
+    def test_data_exists_derived_fundamental(self, mock_s3_client, mock_env_vars):
         """Test checking existence of derived fundamental data"""
         mock_s3_client.head_object.return_value = {}
 
@@ -271,7 +270,7 @@ class TestValidatorIntegration:
             Key='data/derived/features/fundamental/AAPL/metrics.parquet'
         )
 
-    def test_data_exists_ttm(self, mock_s3_client):
+    def test_data_exists_ttm(self, mock_s3_client, mock_env_vars):
         """Test checking existence of TTM data"""
         mock_s3_client.head_object.return_value = {}
 
@@ -284,7 +283,7 @@ class TestValidatorIntegration:
             Key='data/derived/features/fundamental/AAPL/ttm.parquet'
         )
 
-    def test_data_not_exists(self, mock_s3_client):
+    def test_data_not_exists(self, mock_s3_client, mock_env_vars):
         """Test checking non-existent data"""
         # Mock 404 error
         error_response = {'Error': {'Code': '404'}}
@@ -295,7 +294,7 @@ class TestValidatorIntegration:
 
         assert exists is False
 
-    def test_data_exists_with_s3_error(self, mock_s3_client):
+    def test_data_exists_with_s3_error(self, mock_s3_client, mock_env_vars):
         """Test handling of S3 errors other than 404"""
         # Mock non-404 error
         error_response = {'Error': {'Code': '500'}}
@@ -307,7 +306,7 @@ class TestValidatorIntegration:
         # Should return False and log error
         assert exists is False
 
-    def test_data_exists_invalid_parameters(self, mock_s3_client):
+    def test_data_exists_invalid_parameters(self, mock_s3_client, mock_env_vars):
         """Test data_exists with invalid parameters"""
         validator = Validator(s3_client=mock_s3_client)
 
@@ -327,7 +326,7 @@ class TestValidatorIntegration:
         with pytest.raises(ValueError, match="Must provide either year or day"):
             validator.data_exists('AAPL', 'ticks')
 
-    def test_top_3000_exists(self, mock_s3_client):
+    def test_top_3000_exists(self, mock_s3_client, mock_env_vars):
         """Test checking existence of top 3000 symbols file"""
         mock_s3_client.head_object.return_value = {}
 
@@ -340,7 +339,7 @@ class TestValidatorIntegration:
             Key='data/symbols/2024/06/top3000.txt'
         )
 
-    def test_top_3000_not_exists(self, mock_s3_client):
+    def test_top_3000_not_exists(self, mock_s3_client, mock_env_vars):
         """Test checking non-existent top 3000 file"""
         error_response = {'Error': {'Code': '404'}}
         mock_s3_client.head_object.side_effect = ClientError(error_response, 'HeadObject')
@@ -350,7 +349,7 @@ class TestValidatorIntegration:
 
         assert exists is False
 
-    def test_list_available_years_ticks(self, mock_s3_client):
+    def test_list_available_years_ticks(self, mock_s3_client, mock_env_vars):
         """Test listing available years for ticks data"""
         mock_s3_client.list_objects_v2.return_value = {
             'Contents': [
@@ -366,7 +365,7 @@ class TestValidatorIntegration:
 
         assert years == [2024, 2023, 2022]  # Reverse sorted
 
-    def test_list_available_years_invalid_type(self, mock_s3_client):
+    def test_list_available_years_invalid_type(self, mock_s3_client, mock_env_vars):
         """Test list_available_years with invalid data type"""
         validator = Validator(s3_client=mock_s3_client)
 

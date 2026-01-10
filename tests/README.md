@@ -45,11 +45,6 @@ tests/
 ```bash
 # Using uv
 uv run pytest
-
-# Or activate the virtual environment first
-source .venv/bin/activate  # On Unix/macOS
-# .venv\Scripts\activate   # On Windows
-pytest
 ```
 
 ### Run Specific Test Categories
@@ -98,23 +93,6 @@ Tests are marked with the following markers (defined in `pytest.ini`):
 - `@pytest.mark.integration`: Integration tests (require external services)
 - `@pytest.mark.slow`: Slow tests
 - `@pytest.mark.external`: Tests requiring external API access (WRDS, SEC EDGAR, Alpaca, S3)
-
-### Example Usage
-
-```python
-import pytest
-
-@pytest.mark.unit
-def test_rate_limiter():
-    """Fast unit test"""
-    pass
-
-@pytest.mark.integration
-@pytest.mark.external
-def test_s3_upload():
-    """Integration test requiring S3 access"""
-    pass
-```
 
 ## Writing New Tests
 

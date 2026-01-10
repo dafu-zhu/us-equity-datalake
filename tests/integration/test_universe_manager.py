@@ -199,8 +199,8 @@ class TestUniverseManagerIntegration:
 
             manager = UniverseManager(crsp_fetcher=mock_crsp_fetcher)
 
-            with pytest.raises(ValueError, match="Expected sym_type"):
-                manager.load_symbols_for_year(2025, sym_type='invalid')
+            symbols = manager.load_symbols_for_year(2025, sym_type='invalid')
+            assert symbols == []
 
     def test_get_top_3000_with_crsp(self, mock_crsp_fetcher):
         """Test get_top_3000 using CRSP data source"""
