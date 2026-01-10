@@ -28,10 +28,10 @@ def compute_derived(
     All formulas based on data/xbrl/fundamental.xlsx (Priority = 3 rows).
 
     :param raw_df: TTM long DataFrame with columns
-                   [symbol, as_of_date, start, end, concept, value, accn, form, frame]
+                   [symbol, as_of_date, concept, value]
     :param logger: Optional logger for debug messages
     :param symbol: Optional symbol for logging
-    :return: Long-format DataFrame with keys and derived columns
+    :return: Long-format DataFrame with columns [symbol, as_of_date, metric, value]
              Returns empty DataFrame if input is empty
 
     Derived concepts (24 total):
@@ -60,8 +60,6 @@ def compute_derived(
         required_cols = {
             "symbol",
             "as_of_date",
-            "start",
-            "end",
             "concept",
             "value",
         }
@@ -75,18 +73,9 @@ def compute_derived(
         if "as_of_date" in df.columns:
             df = df.sort("as_of_date")
 
-        metadata_cols = [col for col in ["accn", "form", "frame"] if col in df.columns]
-        metadata_df = None
-        if metadata_cols:
-            metadata_df = (
-                df.select(["symbol", "as_of_date", "start", "end"] + metadata_cols)
-                .group_by(["symbol", "as_of_date", "start", "end"])
-                .agg([pl.col(col).last() for col in metadata_cols])
-            )
-
         wide_df = df.pivot(
             values="value",
-            index=["symbol", "as_of_date", "start", "end"],
+            index=["symbol", "as_of_date"],
             on="concept",
             aggregate_function="first",
         )
@@ -167,10 +156,10 @@ def compute_derived(
             logger.debug(f"{log_prefix}Computing return metrics")
 
         df = df.with_columns([
-            # Average Assets = (total assets(t) + total assets(t-1)) / 2
-            ((pl.col("ta") + pl.col("ta").shift(1).over("symbol")) / 2).alias("avg_ast"),
-            # Average Equity = (total equity(t) + total equity(t-1)) / 2
-            ((pl.col("te") + pl.col("te").shift(1).over("symbol")) / 2).alias("avg_eqt"),
+            # Average Assets = (total assets(t) + total assets(t-1Y)) / 2
+            ((pl.col("ta") + pl.col("ta").shift(4).over("symbol")) / 2).alias("avg_ast"),
+            # Average Equity = (total equity(t) + total equity(t-1Y)) / 2
+            ((pl.col("te") + pl.col("te").shift(4).over("symbol")) / 2).alias("avg_eqt"),
             # Effective Tax Rate = income tax expense / income before tax
             safe_divide(pl.col("inc_tax_exp"), pl.col("ibt")).alias("etr"),
         ]).with_columns([
@@ -220,7 +209,7 @@ def compute_derived(
 
         # Extract ONLY derived columns (keys + 24 derived metrics)
         key_columns = [
-            'symbol', 'as_of_date', 'start', 'end'
+            'symbol', 'as_of_date'
         ]
         derived_columns = [
             # Profitability (5)
@@ -243,16 +232,9 @@ def compute_derived(
         long_df = derived_df.melt(
             id_vars=key_columns,
             value_vars=derived_columns,
-            variable_name="concept",
+            variable_name="metric",
             value_name="value",
         ).drop_nulls(subset=["value"])
-
-        if metadata_df is not None:
-            long_df = long_df.join(
-                metadata_df,
-                on=["symbol", "as_of_date", "start", "end"],
-                how="left",
-            )
 
         if logger:
             logger.debug(

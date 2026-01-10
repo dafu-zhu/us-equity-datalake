@@ -51,11 +51,6 @@ def extract_concept(facts: dict, concept: str) -> Optional[dict]:
     :return: Field data with units structure, or None if concept not found
     :raises KeyError: If concept not defined in MAPPINGS
     :raises ValueError: If tag format is invalid
-
-    Example:
-        >>> facts = {'us-gaap': {'Revenues': {'units': {'USD': [...]}}}}
-        >>> extract_concept(facts, 'revenue')
-        {'units': {'USD': [...]}}
     """
     if concept not in MAPPINGS:
         raise KeyError(f"Concept '{concept}' not defined in MAPPINGS")
@@ -274,16 +269,20 @@ class FundamentalExtractor:
         self,
         raw_data: List[dict],
         normalize_duration: bool = False,
+        require_frame: bool = False,
     ) -> List[FndDataPoint]:
         """
         Transform raw SEC data points into FndDataPoint objects.
 
         :param raw_data: List of raw data dictionaries from SEC EDGAR
         :param normalize_duration: When True, normalize to per-quarter duration values
+        :param require_frame: When True, only keep datapoints with a frame
         :return: List of FndDataPoint objects
         """
         if normalize_duration:
             raw_data = self._normalize_duration_raw(raw_data)
+        if require_frame:
+            raw_data = [dp for dp in raw_data if dp.get("frame")]
 
         dps = []
         for dp in raw_data:
@@ -487,7 +486,12 @@ class EDGARDataSource(DataSource):
             raw_data = units[list(units.keys())[0]]
 
         normalize_duration = concept in DURATION_CONCEPTS
-        return self.extractor.parse_datapoints(raw_data, normalize_duration=normalize_duration)
+
+        return self.extractor.parse_datapoints(
+            raw_data,
+            normalize_duration=normalize_duration,
+            require_frame=True
+        )
 
     def get_coverage_period(self) -> tuple[str, str]:
         return ("2009-01-01", "2099-12-31")  # EDGAR coverage
@@ -564,7 +568,7 @@ class Fundamental:
         :return: List of FndDataPoint objects
         """
         raw_data = self.get_sec_field(field, fact_type=fact_type)
-        return self.extractor.parse_datapoints(raw_data)
+        return self.extractor.parse_datapoints(raw_data, require_frame=True)
 
     def get_value_tuple(self, dps: List[FndDataPoint]) -> List[Tuple[dt.date, float]]:
         """
@@ -639,11 +643,6 @@ class Fundamental:
         :param start_date: Optional start date filter "YYYY-MM-DD" (filters on filing date)
         :param end_date: Optional end date filter "YYYY-MM-DD" (filters on filing date)
         :return: List of FndDataPoint objects, or None if not available
-
-        Example:
-            >>> fund = Fundamental(cik='1819994')
-            >>> dps = fund.get_concept_data('revenue')  # Uses EDGAR by default
-            >>> # Future: dps = fund.get_concept_data('revenue', '2005-01-01', '2008-12-31')  # Would use CRSP
         """
         # Try each data source in priority order
         for source in self._sources:

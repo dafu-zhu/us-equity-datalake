@@ -220,7 +220,7 @@ class DataCollectors:
                     if not dps:
                         continue
                     for dp in dps:
-                        if dp.end_date and dp.end_date > end_dt:
+                        if dp.timestamp > end_dt:
                             continue
                         records.append(
                             {
@@ -245,15 +245,28 @@ class DataCollectors:
                 )
                 return pl.DataFrame()
 
-            ttm_df = compute_ttm_long(pl.DataFrame(records), logger=self.logger, symbol=symbol)
+            record_schema = {
+                "symbol": pl.Utf8,
+                "as_of_date": pl.Utf8,
+                "accn": pl.Utf8,
+                "form": pl.Utf8,
+                "concept": pl.Utf8,
+                "value": pl.Float64,
+                "start": pl.Utf8,
+                "end": pl.Utf8,
+                "frame": pl.Utf8,
+            }
+            ttm_df = compute_ttm_long(
+                pl.DataFrame(records, schema=record_schema, strict=False),
+                logger=self.logger,
+                symbol=symbol
+            )
             if len(ttm_df) == 0:
                 return pl.DataFrame()
 
             return ttm_df.filter(
                 (pl.col("as_of_date") >= start_dt.strftime("%Y-%m-%d"))
                 & (pl.col("as_of_date") <= end_dt.strftime("%Y-%m-%d"))
-                & (pl.col("end") >= start_dt.strftime("%Y-%m-%d"))
-                & (pl.col("end") <= end_dt.strftime("%Y-%m-%d"))
             )
 
         except Exception as e:
@@ -271,7 +284,7 @@ class DataCollectors:
         symbol: Optional[str] = None,
         concepts: Optional[List[str]] = None,
         config_path: Optional[Path] = None
-    ) -> pl.DataFrame:
+    ) -> tuple[pl.DataFrame, Optional[pl.DataFrame]]:
         concepts_list = self._load_concepts(concepts, config_path)
         stock_concepts = [c for c in concepts_list if c not in DURATION_CONCEPTS]
         duration_concepts = [c for c in concepts_list if c in DURATION_CONCEPTS]
@@ -280,10 +293,22 @@ class DataCollectors:
             fund = self._get_or_create_fundamental(cik=cik, symbol=symbol)
         except Exception as e:
             self.logger.error(f"Failed to initialize Fundamental for CIK {cik} ({symbol}): {e}")
-            return pl.DataFrame()
+            return pl.DataFrame(), None
 
         start_dt = dt.datetime.strptime(start_date, "%Y-%m-%d").date()
         end_dt = dt.datetime.strptime(end_date, "%Y-%m-%d").date()
+
+        record_schema = {
+            "symbol": pl.Utf8,
+            "as_of_date": pl.Utf8,
+            "accn": pl.Utf8,
+            "form": pl.Utf8,
+            "concept": pl.Utf8,
+            "value": pl.Float64,
+            "start": pl.Utf8,
+            "end": pl.Utf8,
+            "frame": pl.Utf8,
+        }
 
         ttm_records = []
         raw_records = []
@@ -314,7 +339,7 @@ class DataCollectors:
                         }
                     )
 
-                if concept in DURATION_CONCEPTS and dp.end_date and dp.end_date <= end_dt:
+                if concept in DURATION_CONCEPTS and dp.timestamp <= end_dt:
                     ttm_records.append(
                         {
                             "symbol": symbol,
@@ -330,47 +355,30 @@ class DataCollectors:
                     )
 
         if not ttm_records:
-            empty_cols = {
-                "symbol": [],
-                "as_of_date": [],
-                "start": [],
-                "end": [],
-            }
-            for concept in duration_concepts + stock_concepts:
-                empty_cols[concept] = []
-            return pl.DataFrame(empty_cols)
-
-        ttm_df = compute_ttm_long(pl.DataFrame(ttm_records), logger=self.logger, symbol=symbol)
+            return pl.DataFrame(), None
+        ttm_df = compute_ttm_long(
+            pl.DataFrame(ttm_records, schema=record_schema, strict=False),
+            logger=self.logger,
+            symbol=symbol
+        )
         if len(ttm_df) == 0:
-            empty_cols = {
-                "symbol": [],
-                "as_of_date": [],
-                "start": [],
-                "end": [],
-            }
-            for concept in duration_concepts + stock_concepts:
-                empty_cols[concept] = []
-            return pl.DataFrame(empty_cols)
+            return pl.DataFrame(), None
         ttm_df = ttm_df.filter(
             (pl.col("as_of_date") >= start_dt.strftime("%Y-%m-%d"))
             & (pl.col("as_of_date") <= end_dt.strftime("%Y-%m-%d"))
-            & (pl.col("end") >= start_dt.strftime("%Y-%m-%d"))
-            & (pl.col("end") <= end_dt.strftime("%Y-%m-%d"))
         )
         if len(ttm_df) == 0:
-            empty_cols = {
-                "symbol": [],
-                "as_of_date": [],
-                "start": [],
-                "end": [],
-            }
-            for concept in duration_concepts + stock_concepts:
-                empty_cols[concept] = []
-            return pl.DataFrame(empty_cols)
+            return pl.DataFrame(), None
+
+        metadata_df = (
+            ttm_df.select(["symbol", "as_of_date", "accn", "form", "frame"])
+            .group_by(["symbol", "as_of_date"])
+            .agg([pl.col("accn").last(), pl.col("form").last(), pl.col("frame").last()])
+        )
 
         ttm_wide = ttm_df.pivot(
             values="value",
-            index=["symbol", "as_of_date", "start", "end"],
+            index=["symbol", "as_of_date"],
             on="concept",
             aggregate_function="first",
         )
@@ -380,39 +388,43 @@ class DataCollectors:
 
         base = ttm_wide.with_columns(
             pl.col("as_of_date").str.strptime(pl.Date, "%Y-%m-%d")
-        ).sort("as_of_date")
+        ).sort(["symbol", "as_of_date"])
 
-        if not raw_records:
+        raw_long = pl.DataFrame(raw_records, schema=record_schema, strict=False)
+        if len(raw_long) == 0:
             for concept in stock_concepts:
                 if concept not in base.columns:
                     base = base.with_columns(pl.lit(None).alias(concept))
-            return base.with_columns(pl.col("as_of_date").dt.strftime("%Y-%m-%d"))
-
-        raw_long = pl.DataFrame(raw_records)
+            return base.with_columns(pl.col("as_of_date").dt.strftime("%Y-%m-%d")), metadata_df
         stock_long = raw_long.filter(pl.col("concept").is_in(stock_concepts)).with_columns(
             pl.col("as_of_date").str.strptime(pl.Date, "%Y-%m-%d")
-        ).sort("as_of_date")
+        ).sort(["symbol", "as_of_date"])
 
         if len(stock_long) > 0:
             stock_wide = (
                 stock_long
-                .group_by(["as_of_date", "concept"])
+                .group_by(["symbol", "as_of_date", "concept"])
                 .agg(pl.col("value").last())
                 .pivot(
                     values="value",
-                    index="as_of_date",
+                    index=["symbol", "as_of_date"],
                     on="concept",
                     aggregate_function="first",
                 )
-                .sort("as_of_date")
+                .sort(["symbol", "as_of_date"])
             )
-            base = base.join_asof(stock_wide, on="as_of_date", strategy="backward")
+            base = base.join_asof(
+                stock_wide,
+                on="as_of_date",
+                by="symbol",
+                strategy="backward"
+            )
 
         missing_cols = [c for c in stock_concepts if c not in base.columns]
         if missing_cols:
             base = base.with_columns([pl.lit(None).alias(c) for c in missing_cols])
 
-        return base.with_columns(pl.col("as_of_date").dt.strftime("%Y-%m-%d"))
+        return base.with_columns(pl.col("as_of_date").dt.strftime("%Y-%m-%d")), metadata_df
 
     def collect_derived_long(
         self,
@@ -422,13 +434,13 @@ class DataCollectors:
         symbol: Optional[str] = None,
         concepts: Optional[List[str]] = None,
         config_path: Optional[Path] = None
-    ) -> pl.DataFrame:
+    ) -> tuple[pl.DataFrame, Optional[str]]:
         """
         Compute derived metrics and return long-format data.
 
-        Returns columns: [symbol, as_of_date, start, end, accn, form, frame, concept, value]
+        Returns columns: [symbol, as_of_date, metric, value]
         """
-        metrics_wide = self._build_metrics_wide(
+        metrics_wide, _ = self._build_metrics_wide(
             cik=cik,
             start_date=start_date,
             end_date=end_date,
@@ -437,9 +449,9 @@ class DataCollectors:
             config_path=config_path
         )
         if len(metrics_wide) == 0:
-            return pl.DataFrame()
+            return pl.DataFrame(), "metrics_wide_empty"
 
-        id_cols = ["symbol", "as_of_date", "start", "end"]
+        id_cols = ["symbol", "as_of_date"]
         value_cols = [c for c in metrics_wide.columns if c not in id_cols]
         long_input = metrics_wide.melt(
             id_vars=id_cols,
@@ -448,47 +460,16 @@ class DataCollectors:
             value_name="value",
         ).drop_nulls(subset=["value"])
 
-        # Use TTM metadata for derived rows (accn/form/frame)
-        ttm_df = self.collect_ttm_long_range(
-            cik=cik,
-            start_date=start_date,
-            end_date=end_date,
-            symbol=symbol,
-            concepts=concepts,
-            config_path=config_path
-        )
-        metadata_df = None
-        if len(ttm_df) > 0:
-            metadata_df = (
-                ttm_df.select(["symbol", "as_of_date", "start", "end", "accn", "form", "frame"])
-                .group_by(["symbol", "as_of_date", "start", "end"])
-                .agg([pl.col("accn").last(), pl.col("form").last(), pl.col("frame").last()])
-            )
-
-        if metadata_df is not None:
-            long_input = long_input.join(
-                metadata_df,
-                on=["symbol", "as_of_date", "start", "end"],
-                how="left",
-            )
-
         derived_long = compute_derived(long_input, logger=self.logger, symbol=symbol)
         if len(derived_long) == 0:
-            return pl.DataFrame()
-
-        if "frame" in derived_long.columns:
-            derived_long = derived_long.filter(pl.col("frame").is_not_null())
-            if len(derived_long) == 0:
-                return pl.DataFrame()
+            return pl.DataFrame(), "derived_empty"
 
         start_dt = dt.datetime.strptime(start_date, "%Y-%m-%d").date()
         end_dt = dt.datetime.strptime(end_date, "%Y-%m-%d").date()
         return derived_long.filter(
             (pl.col("as_of_date") >= start_dt.strftime("%Y-%m-%d"))
             & (pl.col("as_of_date") <= end_dt.strftime("%Y-%m-%d"))
-            & (pl.col("end") >= start_dt.strftime("%Y-%m-%d"))
-            & (pl.col("end") <= end_dt.strftime("%Y-%m-%d"))
-        )
+        ), None
 
     def collect_daily_ticks_year(self, sym: str, year: int) -> pl.DataFrame:
         """

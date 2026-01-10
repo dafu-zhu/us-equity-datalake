@@ -431,7 +431,7 @@ class DataPublishers:
         Publish derived fundamental data for a single symbol for a date range to S3.
 
         Storage: data/derived/features/fundamental/{symbol}/metrics.parquet
-        Contains ONLY derived metrics (keys + 24 derived columns).
+        Contains ONLY derived metrics (long format with symbol/as_of_date/metric/value).
 
         :param sym: Symbol in Alpaca format (e.g., 'BRK.B')
         :param start_date: Start date (YYYY-MM-DD)

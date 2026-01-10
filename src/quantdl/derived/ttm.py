@@ -40,12 +40,8 @@ def compute_ttm_long(
     required_cols = {
         "symbol",
         "as_of_date",
-        "accn",
-        "form",
         "concept",
         "value",
-        "start",
-        "end",
         "frame",
     }
     missing_cols = required_cols - set(raw_df.columns)
@@ -61,18 +57,37 @@ def compute_ttm_long(
     if len(df) == 0:
         return pl.DataFrame()
 
+    select_cols = [
+        "symbol",
+        "as_of_date",
+        "concept",
+        "value",
+        "accn",
+        "form",
+        "start",
+        "end",
+        "frame",
+    ]
     groups = defaultdict(list)
-    for row in df.select(list(required_cols)).to_dicts():
+    for row in df.select(select_cols).to_dicts():
         if row.get("value") is None:
             continue
-        if not row.get("as_of_date") or not row.get("end") or not row.get("start"):
+        if not row.get("as_of_date"):
             continue
         if not row.get("frame"):
             continue
         try:
             as_of_date = dt.datetime.strptime(row["as_of_date"], "%Y-%m-%d").date()
-            end_date = dt.datetime.strptime(row["end"], "%Y-%m-%d").date()
-            start_date = dt.datetime.strptime(row["start"], "%Y-%m-%d").date()
+            end_date = (
+                dt.datetime.strptime(row["end"], "%Y-%m-%d").date()
+                if row.get("end")
+                else None
+            )
+            start_date = (
+                dt.datetime.strptime(row["start"], "%Y-%m-%d").date()
+                if row.get("start")
+                else None
+            )
         except ValueError:
             continue
 
@@ -92,44 +107,34 @@ def compute_ttm_long(
 
     output_rows = []
     for _, rows in groups.items():
-        rows.sort(key=lambda r: (r["end_date"], r["as_of_date"]))
-        end_order: list[dt.date] = []
-        end_values: dict[dt.date, dict] = {}
-
-        for row in rows:
-            end_date = row["end_date"]
-            if end_date not in end_values:
-                end_order.append(end_date)
-
-            end_values[end_date] = {
-                "value": row["value"],
-                "start_date": row["start_date"],
-                "frame": row.get("frame"),
-            }
-
-            if len(end_order) < 4:
+        rows.sort(key=lambda r: r["as_of_date"])
+        for idx in range(3, len(rows)):
+            window = rows[idx - 3:idx + 1]
+            if any(w.get("value") is None for w in window):
                 continue
-
-            last_four = end_order[-4:]
-            if any(end not in end_values for end in last_four):
-                continue
-
-            ttm_value = sum(end_values[end]["value"] for end in last_four)
-            ttm_start = end_values[last_four[0]]["start_date"]
-            if ttm_start is None:
-                continue
+            ttm_value = sum(w["value"] for w in window)
+            ttm_start = (
+                window[0]["start_date"].isoformat()
+                if window[0].get("start_date")
+                else None
+            )
+            ttm_end = (
+                rows[idx]["end_date"].isoformat()
+                if rows[idx].get("end_date")
+                else None
+            )
 
             output_rows.append(
                 {
-                    "symbol": row["symbol"],
-                    "as_of_date": row["as_of_date"].isoformat(),
-                    "accn": row.get("accn"),
-                    "form": row.get("form"),
-                    "concept": row["concept"],
+                    "symbol": rows[idx]["symbol"],
+                    "as_of_date": rows[idx]["as_of_date"].isoformat(),
+                    "accn": rows[idx].get("accn"),
+                    "form": rows[idx].get("form"),
+                    "concept": rows[idx]["concept"],
                     "value": ttm_value,
-                    "start": ttm_start.isoformat(),
-                    "end": last_four[-1].isoformat(),
-                    "frame": end_values[last_four[-1]].get("frame"),
+                    "start": ttm_start,
+                    "end": ttm_end,
+                    "frame": rows[idx].get("frame"),
                 }
             )
 
