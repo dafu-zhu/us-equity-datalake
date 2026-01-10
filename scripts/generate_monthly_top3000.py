@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
 
-from quantdl.stock_pool.universe_manager import UniverseManager
+from quantdl.universe.manager import UniverseManager
 from quantdl.utils.logger import setup_logger
 
 

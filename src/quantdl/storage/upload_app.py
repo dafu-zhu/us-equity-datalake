@@ -23,7 +23,7 @@ from quantdl.storage.data_collectors import DataCollectors
 from quantdl.storage.data_publishers import DataPublishers
 from quantdl.collection.alpaca_ticks import Ticks
 from quantdl.collection.crsp_ticks import CRSPDailyTicks
-from quantdl.stock_pool.universe_manager import UniverseManager
+from quantdl.universe.manager import UniverseManager
 
 load_dotenv()
 

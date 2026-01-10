@@ -1,0 +1,27 @@
+# Test Dependencies for US Equity Data Lake
+
+# Core testing framework
+pytest>=7.0.0
+pytest-cov>=4.0.0          # Coverage plugin
+pytest-xdist>=3.0.0        # Parallel test execution
+pytest-mock>=3.10.0        # Enhanced mocking
+
+# Assertions and testing utilities
+pytest-timeout>=2.1.0      # Timeout for long-running tests
+pytest-benchmark>=4.0.0    # Performance benchmarking (optional)
+
+# Code quality
+flake8>=6.0.0             # Linting
+black>=23.0.0             # Code formatting
+mypy>=1.0.0               # Type checking
+isort>=5.12.0             # Import sorting
+
+# Coverage reporting
+coverage[toml]>=7.0.0
+
+# Additional utilities for testing
+freezegun>=1.2.0          # Mock datetime
+responses>=0.23.0         # Mock HTTP requests
+faker>=18.0.0             # Generate fake data
+
+# Note: Main dependencies (polars, pandas, etc.) are in main requirements

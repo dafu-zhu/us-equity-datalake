@@ -7,8 +7,8 @@ import logging
 from typing import Dict, Optional
 from quantdl.collection.crsp_ticks import CRSPDailyTicks
 from quantdl.collection.alpaca_ticks import Ticks
-from quantdl.stock_pool.universe import fetch_all_stocks
-from quantdl.stock_pool.history_universe import get_hist_universe_nasdaq
+from quantdl.universe.current import fetch_all_stocks
+from quantdl.universe.historical import get_hist_universe_nasdaq
 from quantdl.master.security_master import SecurityMaster
 from quantdl.utils.logger import setup_logger
 
