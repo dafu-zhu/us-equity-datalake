@@ -80,8 +80,10 @@ class UniverseManager:
         try:
             # For years >= 2025 (using Alpaca), use current ticker list
             if year >= 2025:
-                df = fetch_all_stocks(with_filter=True, refresh=True, logger=self.logger)
-                nasdaq_symbols = df['Ticker'].to_list()
+                if self._current_symbols_cache is None:
+                    df = fetch_all_stocks(with_filter=True, refresh=True, logger=self.logger)
+                    self._current_symbols_cache = df['Ticker'].to_list()
+                nasdaq_symbols = self._current_symbols_cache
                 self.logger.info(f"Using current ticker list for {year} ({len(nasdaq_symbols)} symbols)")
             else:
                 # For historical years (< 2025), use CRSP historical universe
