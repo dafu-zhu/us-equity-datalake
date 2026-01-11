@@ -395,6 +395,31 @@ class TestGetDailyRange:
     @patch('quantdl.collection.crsp_ticks.validate_permno')
     @patch('quantdl.collection.crsp_ticks.SecurityMaster')
     @patch('quantdl.collection.crsp_ticks.setup_logger')
+    def test_get_daily_range_unadjusted_query(self, mock_logger, mock_security_master, mock_validate_permno, mock_validate_date):
+        """Test get_daily_range uses unadjusted query when adjusted=False."""
+        mock_conn = Mock()
+
+        mock_sm_instance = Mock()
+        mock_sm_instance.get_security_id.return_value = 'sid_123'
+        mock_sm_instance.sid_to_permno.return_value = 10516
+        mock_security_master.return_value = mock_sm_instance
+
+        mock_validate_permno.return_value = 10516
+        mock_validate_date.side_effect = lambda x: x
+
+        mock_conn.raw_sql.return_value = pd.DataFrame()
+
+        crsp = CRSPDailyTicks(conn=mock_conn)
+        crsp.get_daily_range(symbol='AAPL', start_day='2024-06-28', end_day='2024-06-30', adjusted=False)
+
+        query = mock_conn.raw_sql.call_args[0][0]
+        assert 'cfacpr' not in query
+        assert 'cfacshr' not in query
+
+    @patch('quantdl.collection.crsp_ticks.validate_date_string')
+    @patch('quantdl.collection.crsp_ticks.validate_permno')
+    @patch('quantdl.collection.crsp_ticks.SecurityMaster')
+    @patch('quantdl.collection.crsp_ticks.setup_logger')
     def test_get_daily_range_security_id_none(self, mock_logger, mock_security_master, mock_validate_permno, mock_validate_date):
         """Test get_daily_range raises when security_id is None."""
         mock_conn = Mock()
@@ -1110,6 +1135,45 @@ class TestCollectDailyTicksYearBulk:
         crsp.close()
 
         mock_conn.close.assert_called_once()
+
+    @patch('quantdl.collection.crsp_ticks.validate_date_string')
+    @patch('quantdl.collection.crsp_ticks.validate_permno')
+    @patch('quantdl.collection.crsp_ticks.SecurityMaster')
+    @patch('quantdl.collection.crsp_ticks.setup_logger')
+    def test_collect_daily_ticks_year_bulk_unadjusted_query(self, mock_logger, mock_security_master, mock_validate_permno, mock_validate_date):
+        """Bulk fetch uses unadjusted query when adjusted=False."""
+        import polars as pl
+
+        mock_conn = Mock()
+        mock_sm_instance = Mock()
+
+        end_day = "2024-12-31"
+        date_check = pd.Timestamp(end_day).date()
+
+        mock_sm_instance.master_tb = pl.DataFrame({
+            "symbol": ["AAPL"],
+            "start_date": [pd.Timestamp("2000-01-01").date()],
+            "end_date": [date_check],
+            "security_id": ["sid_1"]
+        })
+        mock_sm_instance.security_map = Mock(return_value=pl.DataFrame({
+            "security_id": ["sid_1"],
+            "permno": [10516]
+        }))
+        mock_sm_instance.get_security_id = Mock()
+        mock_security_master.return_value = mock_sm_instance
+
+        mock_validate_permno.return_value = 10516
+        mock_validate_date.side_effect = lambda x: x
+
+        mock_conn.raw_sql.return_value = pd.DataFrame()
+
+        crsp = CRSPDailyTicks(conn=mock_conn)
+        crsp.collect_daily_ticks_year_bulk(["AAPL"], 2024, adjusted=False, auto_resolve=True)
+
+        query = mock_conn.raw_sql.call_args[0][0]
+        assert 'cfacpr' not in query
+        assert 'cfacshr' not in query
 
 
 class TestGetDailyValidation:

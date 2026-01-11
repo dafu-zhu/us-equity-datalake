@@ -29,6 +29,24 @@ class TestComputeDerived:
         result = compute_derived(df)
         assert result.is_empty()
 
+    def test_logger_debug_on_empty_and_missing_columns(self):
+        """Logger gets debug calls for empty input and missing columns."""
+        logger = Mock()
+
+        empty_df = pl.DataFrame()
+        result = compute_derived(empty_df, logger=logger, symbol="AAPL")
+        assert result.is_empty()
+        logger.debug.assert_called()
+
+        logger.reset_mock()
+        missing_df = pl.DataFrame({
+            'symbol': ['AAPL'],
+            'value': [1000000.0]
+        })
+        result = compute_derived(missing_df, logger=logger, symbol="AAPL")
+        assert result.is_empty()
+        logger.debug.assert_called()
+
     @pytest.fixture
     def sample_ttm_data(self):
         """Create sample TTM data for testing"""

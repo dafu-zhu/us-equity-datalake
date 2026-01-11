@@ -15,12 +15,10 @@ from collections import OrderedDict
 from typing import List, Dict, Optional
 from pathlib import Path
 import yaml
-import requests
 import polars as pl
 
 from quantdl.collection.models import TickField, DataCollector
-from quantdl.collection.fundamental import Fundamental, DURATION_CONCEPTS, SECClient, FundamentalExtractor
-from quantdl.collection.alpaca_ticks import Ticks
+from quantdl.collection.fundamental import Fundamental, DURATION_CONCEPTS
 from quantdl.universe.current import fetch_all_stocks
 from quantdl.utils.logger import setup_logger
 from quantdl.utils.mapping import align_calendar

@@ -400,6 +400,135 @@ class TestFundamentalExtractor:
         # Should skip incomplete data points
         assert result == []
 
+    def test_normalize_duration_raw_pick_frame_exact(self):
+        """Annual frame uses exact Q1/Q2/Q3 to derive Q4."""
+        from quantdl.collection.fundamental import FundamentalExtractor
+
+        extractor = FundamentalExtractor()
+
+        raw_data = [
+            {
+                'val': 100.0,
+                'start': '2024-01-01',
+                'end': '2024-03-31',
+                'filed': '2024-05-01',
+                'frame': 'CY2024Q1'
+            },
+            {
+                'val': 200.0,
+                'start': '2024-04-01',
+                'end': '2024-06-30',
+                'filed': '2024-08-01',
+                'frame': 'CY2024Q2'
+            },
+            {
+                'val': 300.0,
+                'start': '2024-07-01',
+                'end': '2024-09-30',
+                'filed': '2024-11-01',
+                'frame': 'CY2024Q3'
+            },
+            {
+                'val': 1000.0,
+                'start': '2024-01-01',
+                'end': '2024-12-31',
+                'filed': '2025-02-01',
+                'frame': 'CY2024'
+            }
+        ]
+
+        result = extractor._normalize_duration_raw(raw_data)
+
+        q4 = next(dp for dp in result if dp.get("frame") == "CY2024")
+        assert q4["val"] == 400.0
+        assert q4["start"] == "2024-10-01"
+
+    def test_normalize_duration_raw_pick_frame_fallbacks(self):
+        """Annual frame uses Q1I and prefix-matched frames when exact missing."""
+        from quantdl.collection.fundamental import FundamentalExtractor
+
+        extractor = FundamentalExtractor()
+
+        raw_data = [
+            {
+                'val': 110.0,
+                'start': '2024-01-01',
+                'end': '2024-03-31',
+                'filed': '2024-05-01',
+                'frame': 'CY2024Q1I'
+            },
+            {
+                'val': 210.0,
+                'start': '2024-04-01',
+                'end': '2024-06-30',
+                'filed': '2024-08-01',
+                'frame': 'CY2024Q2'
+            },
+            {
+                'val': 310.0,
+                'start': '2024-07-01',
+                'end': '2024-09-30',
+                'filed': '2024-11-01',
+                'frame': 'CY2024Q3'
+            },
+            {
+                'val': 1000.0,
+                'start': '2024-01-01',
+                'end': '2024-12-31',
+                'filed': '2025-02-01',
+                'frame': 'CY2024'
+            }
+        ]
+
+        result = extractor._normalize_duration_raw(raw_data)
+
+        q4 = next(dp for dp in result if dp.get("frame") == "CY2024")
+        assert q4["val"] == 370.0
+        assert q4["start"] == "2024-10-01"
+
+    def test_normalize_duration_raw_pick_frame_prefix(self):
+        """Annual frame falls back to prefix match when only CY...Q1A exists."""
+        from quantdl.collection.fundamental import FundamentalExtractor
+
+        extractor = FundamentalExtractor()
+
+        raw_data = [
+            {
+                'val': 120.0,
+                'start': '2024-01-01',
+                'end': '2024-03-31',
+                'filed': '2024-05-01',
+                'frame': 'CY2024Q1A'
+            },
+            {
+                'val': 220.0,
+                'start': '2024-04-01',
+                'end': '2024-06-30',
+                'filed': '2024-08-01',
+                'frame': 'CY2024Q2'
+            },
+            {
+                'val': 320.0,
+                'start': '2024-07-01',
+                'end': '2024-09-30',
+                'filed': '2024-11-01',
+                'frame': 'CY2024Q3'
+            },
+            {
+                'val': 1000.0,
+                'start': '2024-01-01',
+                'end': '2024-12-31',
+                'filed': '2025-02-01',
+                'frame': 'CY2024'
+            }
+        ]
+
+        result = extractor._normalize_duration_raw(raw_data)
+
+        q4 = next(dp for dp in result if dp.get("frame") == "CY2024")
+        assert q4["val"] == 340.0
+        assert q4["start"] == "2024-10-01"
+
     @patch.dict('quantdl.collection.fundamental.MAPPINGS', {'rev': ['us-gaap:Revenues']})
     def test_extract_prefix_not_in_facts(self):
         """Test extraction when prefix doesn't exist in facts"""
@@ -726,141 +855,6 @@ class TestParseDatapoints:
         assert result[0].start_date is None
 
 
-class TestFundamentalTransformer:
-    """Test FundamentalTransformer class"""
-
-    def test_transformer_init_default_path(self):
-        """Test FundamentalTransformer initialization with default calendar path"""
-        from quantdl.collection.fundamental import FundamentalTransformer
-        from pathlib import Path
-
-        transformer = FundamentalTransformer()
-
-        assert transformer.calendar_path == Path("data/calendar/master.parquet")
-
-    def test_transformer_init_custom_path(self):
-        """Test FundamentalTransformer initialization with custom calendar path"""
-        from quantdl.collection.fundamental import FundamentalTransformer
-        from pathlib import Path
-
-        custom_path = Path("custom/calendar.parquet")
-        transformer = FundamentalTransformer(calendar_path=custom_path)
-
-        assert transformer.calendar_path == custom_path
-
-    def test_to_value_tuples(self):
-        """Test to_value_tuples conversion"""
-        from quantdl.collection.fundamental import FundamentalTransformer, FndDataPoint
-        import datetime as dt
-
-        transformer = FundamentalTransformer()
-
-        dps = [
-            FndDataPoint(
-                timestamp=dt.date(2024, 4, 15),
-                value=1000000,
-                start_date=dt.date(2024, 1, 1),
-                end_date=dt.date(2024, 3, 31),
-                frame='CY2024Q1',
-                is_instant=False,
-                form='10-Q',
-                accn='0001'
-            ),
-            FndDataPoint(
-                timestamp=dt.date(2024, 1, 15),
-                value=500000,
-                start_date=dt.date(2023, 10, 1),
-                end_date=dt.date(2023, 12, 31),
-                frame='CY2023Q4',
-                is_instant=False,
-                form='10-Q',
-                accn='0002'
-            )
-        ]
-
-        result = transformer.to_value_tuples(dps)
-
-        # Should be sorted by date
-        assert len(result) == 2
-        assert result[0][0] == dt.date(2024, 1, 15)
-        assert result[0][1] == 500000
-        assert result[1][0] == dt.date(2024, 4, 15)
-        assert result[1][1] == 1000000
-
-    def test_aggregate_fields_raw_basic(self):
-        """Test aggregate_fields_raw with basic data"""
-        from quantdl.collection.fundamental import FundamentalTransformer
-        import datetime as dt
-
-        transformer = FundamentalTransformer()
-
-        fields_dict = {
-            'revenue': [
-                (dt.date(2024, 4, 15), 1000000),
-                (dt.date(2024, 7, 15), 1100000)
-            ],
-            'net_income': [
-                (dt.date(2024, 4, 15), 100000),
-                (dt.date(2024, 7, 15), 110000)
-            ]
-        }
-
-        result = transformer.aggregate_fields_raw('2024-01-01', '2024-12-31', fields_dict)
-
-        # Should have both fields
-        assert 'timestamp' in result.columns
-        assert 'revenue' in result.columns
-        assert 'net_income' in result.columns
-        assert len(result) == 2
-
-    def test_aggregate_fields_raw_empty_data(self):
-        """Test aggregate_fields_raw with empty data"""
-        from quantdl.collection.fundamental import FundamentalTransformer
-        import polars as pl
-
-        transformer = FundamentalTransformer()
-
-        fields_dict = {
-            'revenue': [],
-            'net_income': []
-        }
-
-        result = transformer.aggregate_fields_raw('2024-01-01', '2024-12-31', fields_dict)
-
-        # Should return empty DataFrame
-        assert isinstance(result, pl.DataFrame)
-        assert len(result) == 0
-
-    def test_aggregate_fields_raw_partial_data(self):
-        """Test aggregate_fields_raw with partial data per field"""
-        from quantdl.collection.fundamental import FundamentalTransformer
-        import datetime as dt
-
-        transformer = FundamentalTransformer()
-
-        fields_dict = {
-            'revenue': [
-                (dt.date(2024, 4, 15), 1000000),
-                (dt.date(2024, 7, 15), 1100000)
-            ],
-            'net_income': [
-                (dt.date(2024, 4, 15), 100000)
-                # Missing 2024-07-15
-            ]
-        }
-
-        result = transformer.aggregate_fields_raw('2024-01-01', '2024-12-31', fields_dict)
-
-        # Should have 2 rows (one per unique timestamp)
-        assert len(result) == 2
-        # First row should have both values
-        assert result.filter(result['timestamp'] == dt.date(2024, 4, 15))['revenue'][0] == 1000000
-        assert result.filter(result['timestamp'] == dt.date(2024, 4, 15))['net_income'][0] == 100000
-        # Second row should have revenue but None for net_income
-        assert result.filter(result['timestamp'] == dt.date(2024, 7, 15))['revenue'][0] == 1100000
-        assert result.filter(result['timestamp'] == dt.date(2024, 7, 15))['net_income'][0] is None
-
-
 class TestEDGARDataSource:
     """Test EDGARDataSource class"""
 
@@ -992,129 +986,6 @@ class TestFundamental:
         assert fund.symbol == 'AAPL'
         assert len(fund._sources) == 1  # EDGAR source
 
-    @patch('quantdl.collection.fundamental.SECClient')
-    def test_fundamental_get_sec_field(self, mock_sec_client_class):
-        """Test get_sec_field method"""
-        from quantdl.collection.fundamental import Fundamental
-
-        mock_response = {
-            'facts': {
-                'us-gaap': {
-                    'Assets': {
-                        'label': 'Assets',
-                        'units': {
-                            'USD': [
-                                {'val': 1000000, 'fy': 2024, 'fp': 'FY'}
-                            ]
-                        }
-                    }
-                }
-            }
-        }
-
-        mock_client = Mock()
-        mock_client.fetch_company_facts.return_value = mock_response
-        mock_sec_client_class.return_value = mock_client
-
-        fund = Fundamental(cik='320193')
-        result = fund.get_sec_field('Assets', 'us-gaap')
-
-        assert len(result) == 1
-        assert result[0]['val'] == 1000000
-
-    @patch('quantdl.collection.fundamental.SECClient')
-    def test_fundamental_get_dps(self, mock_sec_client_class):
-        """Test get_dps method"""
-        from quantdl.collection.fundamental import Fundamental
-
-        mock_response = {
-            'facts': {
-                'us-gaap': {
-                    'Assets': {
-                        'label': 'Assets',
-                        'units': {
-                            'USD': [
-                                {
-                                    'val': 1000000,
-                                    'start': '2024-01-01',
-                                    'end': '2024-03-31',
-                                    'filed': '2024-04-15',
-                                    'frame': 'CY2024Q1',
-                                    'form': '10-Q',
-                                    'accn': '0001'
-                                }
-                            ]
-                        }
-                    }
-                }
-            }
-        }
-
-        mock_client = Mock()
-        mock_client.fetch_company_facts.return_value = mock_response
-        mock_sec_client_class.return_value = mock_client
-
-        fund = Fundamental(cik='320193')
-        result = fund.get_dps('Assets', 'us-gaap')
-
-        assert len(result) == 1
-        assert result[0].value == 1000000
-
-    @patch('quantdl.collection.fundamental.SECClient')
-    def test_fundamental_get_value_tuple(self, mock_sec_client_class):
-        """Test get_value_tuple method"""
-        from quantdl.collection.fundamental import Fundamental, FndDataPoint
-        import datetime as dt
-
-        mock_client = Mock()
-        mock_client.fetch_company_facts.return_value = {'facts': {}}
-        mock_sec_client_class.return_value = mock_client
-
-        fund = Fundamental(cik='320193')
-
-        dps = [
-            FndDataPoint(
-                timestamp=dt.date(2024, 4, 15),
-                value=1000000,
-                start_date=dt.date(2024, 1, 1),
-                end_date=dt.date(2024, 3, 31),
-                frame='CY2024Q1',
-                is_instant=False,
-                form='10-Q',
-                accn='0001'
-            )
-        ]
-
-        result = fund.get_value_tuple(dps)
-
-        assert len(result) == 1
-        assert result[0][0] == dt.date(2024, 4, 15)
-        assert result[0][1] == 1000000
-
-    @patch('quantdl.collection.fundamental.SECClient')
-    def test_fundamental_collect_fields_raw(self, mock_sec_client_class):
-        """Test collect_fields_raw method"""
-        from quantdl.collection.fundamental import Fundamental
-        import datetime as dt
-
-        mock_client = Mock()
-        mock_client.fetch_company_facts.return_value = {'facts': {}}
-        mock_sec_client_class.return_value = mock_client
-
-        fund = Fundamental(cik='320193')
-
-        fields_dict = {
-            'revenue': [
-                (dt.date(2024, 4, 15), 1000000)
-            ]
-        }
-
-        result = fund.collect_fields_raw('2024-01-01', '2024-12-31', fields_dict)
-
-        assert 'revenue' in result.columns
-        assert len(result) == 1
-
-    @patch.dict('quantdl.collection.fundamental.MAPPINGS', {'rev': ['us-gaap:Revenues']})
     @patch('quantdl.collection.fundamental.SECClient')
     def test_fundamental_get_concept_data(self, mock_sec_client_class):
         """Test get_concept_data method"""

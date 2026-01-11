@@ -191,21 +191,3 @@ class Validator:
             self.logger.error(f"Error checking {s3_key}: {error}")
             return False
         
-
-if __name__ == '__main__':
-    import time
-    vld = Validator()
-    start = time.perf_counter()
-    years = vld.list_available_years('AAPL', data_type='ticks')
-    print(time.perf_counter() - start)
-
-    start = time.perf_counter()
-    vld.data_exists('AAPL', 'ticks', 2024)
-    print(time.perf_counter() - start)
-
-    # Expected output
-    # 0.229747585000041
-    # 0.043064168999990216
-
-    files = vld.list_files_under_prefix('data/raw/fundamental')
-    print(len(files))

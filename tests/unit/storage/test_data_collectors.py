@@ -563,6 +563,97 @@ class TestTicksDataCollector:
 
         assert result.is_empty()
 
+    def test_collect_daily_ticks_month_alpaca_exception(self):
+        """Alpaca path returns empty and logs warning on exception."""
+        from quantdl.storage.data_collectors import TicksDataCollector
+
+        mock_crsp = Mock()
+        mock_alpaca = Mock()
+        mock_alpaca.fetch_daily_month_bulk.side_effect = RuntimeError("boom")
+        mock_logger = Mock(spec=logging.Logger)
+
+        collector = TicksDataCollector(
+            crsp_ticks=mock_crsp,
+            alpaca_ticks=mock_alpaca,
+            alpaca_headers={},
+            logger=mock_logger
+        )
+
+        result = collector.collect_daily_ticks_month("AAPL", 2025, 6)
+
+        assert result.is_empty()
+        mock_logger.warning.assert_called()
+
+    def test_collect_daily_ticks_month_year_df_aligns_calendar(self, tmp_path):
+        """Year_df branch aligns calendar when calendar file exists."""
+        from quantdl.storage.data_collectors import TicksDataCollector
+
+        mock_crsp = Mock()
+        mock_crsp.calendar_path = str(tmp_path / "calendar.csv")
+        (tmp_path / "calendar.csv").write_text("date\n")
+        mock_alpaca = Mock()
+
+        collector = TicksDataCollector(
+            crsp_ticks=mock_crsp,
+            alpaca_ticks=mock_alpaca,
+            alpaca_headers={},
+            logger=Mock(spec=logging.Logger)
+        )
+
+        year_df = pl.DataFrame({
+            "timestamp": ["2024-06-30"],
+            "open": [190.0],
+            "high": [195.0],
+            "low": [189.0],
+            "close": [193.0],
+            "volume": [50000000]
+        })
+
+        aligned = [{
+            "timestamp": "2024-06-30",
+            "open": 190.0,
+            "high": 195.0,
+            "low": 189.0,
+            "close": 193.0,
+            "volume": 50000000
+        }]
+
+        with patch('quantdl.storage.data_collectors.align_calendar', return_value=aligned) as mock_align:
+            result = collector.collect_daily_ticks_month("AAPL", 2024, 6, year_df=year_df)
+
+        assert result["timestamp"][0] == "2024-06-30"
+        mock_align.assert_called()
+
+    def test_collect_daily_ticks_month_bulk_crsp(self):
+        """Bulk month fetch uses per-symbol CRSP path for years < 2025."""
+        from quantdl.storage.data_collectors import TicksDataCollector
+
+        mock_crsp = Mock()
+        mock_alpaca = Mock()
+        collector = TicksDataCollector(
+            crsp_ticks=mock_crsp,
+            alpaca_ticks=mock_alpaca,
+            alpaca_headers={},
+            logger=Mock(spec=logging.Logger)
+        )
+
+        df = pl.DataFrame({
+            "timestamp": ["2024-06-30"],
+            "open": [190.0],
+            "high": [195.0],
+            "low": [189.0],
+            "close": [193.0],
+            "volume": [50000000]
+        })
+        collector.collect_daily_ticks_month = Mock(return_value=df)
+
+        result = collector.collect_daily_ticks_month_bulk(["AAPL", "MSFT"], 2024, 6)
+
+        assert result["AAPL"]["close"][0] == 193.0
+        assert result["MSFT"]["close"][0] == 193.0
+        assert collector.collect_daily_ticks_month.call_count == 2
+        mock_alpaca.fetch_daily_month_bulk.assert_not_called()
+
 
 class TestFundamentalDataCollector:
     """Test FundamentalDataCollector class (refactored)"""
@@ -657,6 +748,25 @@ class TestFundamentalDataCollector:
         assert one is f1
         assert two is f2
         assert again is f3
+
+    def test_get_or_create_fundamental_no_cache(self):
+        """Cache size <= 0 returns new instance each time."""
+        from quantdl.storage import data_collectors as dc
+
+        mock_logger = Mock(spec=logging.Logger)
+        collector = dc.FundamentalDataCollector(logger=mock_logger, fundamental_cache_size=0)
+
+        with patch('quantdl.storage.data_collectors.Fundamental') as mock_fundamental:
+            f1 = Mock()
+            f2 = Mock()
+            mock_fundamental.side_effect = [f1, f2]
+
+            one = collector._get_or_create_fundamental("0001")
+            two = collector._get_or_create_fundamental("0001")
+
+        assert one is f1
+        assert two is f2
+        assert len(collector._fundamental_cache) == 0
 
     def test_collect_fundamental_long_records(self):
         """Builds records from concept data within date range."""

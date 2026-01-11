@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import queue
 import threading
 import polars as pl
+import requests
 
 
 def _make_publisher():
@@ -263,6 +264,38 @@ class TestDataPublishers:
         assert result["status"] == "success"
         publisher.upload_fileobj.assert_called_once()
 
+    def test_publish_fundamental_request_exception(self):
+        publisher, _, data_collectors = _make_publisher()
+        data_collectors.collect_fundamental_long.side_effect = requests.RequestException("boom")
+
+        sec_rate_limiter = Mock()
+
+        result = publisher.publish_fundamental(
+            sym="AAPL",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            cik="0000320193",
+            sec_rate_limiter=sec_rate_limiter
+        )
+
+        assert result["status"] == "failed"
+
+    def test_publish_fundamental_value_error(self):
+        publisher, _, data_collectors = _make_publisher()
+        data_collectors.collect_fundamental_long.side_effect = ValueError("bad data")
+
+        sec_rate_limiter = Mock()
+
+        result = publisher.publish_fundamental(
+            sym="AAPL",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            cik="0000320193",
+            sec_rate_limiter=sec_rate_limiter
+        )
+
+        assert result["status"] == "failed"
+
     def test_publish_ttm_fundamental_success(self):
         publisher, _, data_collectors = _make_publisher()
         publisher.upload_fileobj = Mock()
@@ -304,6 +337,23 @@ class TestDataPublishers:
 
         assert result["status"] == "skipped"
 
+    def test_publish_ttm_fundamental_request_exception(self):
+        publisher, _, data_collectors = _make_publisher()
+        data_collectors._load_concepts.return_value = ["rev"]
+        data_collectors.collect_ttm_long_range.side_effect = requests.RequestException("boom")
+
+        sec_rate_limiter = Mock()
+
+        result = publisher.publish_ttm_fundamental(
+            sym="AAPL",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            cik="0000320193",
+            sec_rate_limiter=sec_rate_limiter
+        )
+
+        assert result["status"] == "failed"
+
     def test_publish_derived_fundamental_success(self):
         publisher, _, _ = _make_publisher()
         publisher.upload_fileobj = Mock()
@@ -323,6 +373,25 @@ class TestDataPublishers:
 
         assert result["status"] == "success"
         publisher.upload_fileobj.assert_called_once()
+
+    def test_publish_derived_fundamental_upload_error(self):
+        publisher, _, _ = _make_publisher()
+        publisher.upload_fileobj = Mock(side_effect=RuntimeError("boom"))
+        derived_df = pl.DataFrame({
+            "symbol": ["AAPL"],
+            "as_of_date": ["2024-06-30"],
+            "metric": ["net_mgn"],
+            "value": [0.1]
+        })
+
+        result = publisher.publish_derived_fundamental(
+            sym="AAPL",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            derived_df=derived_df
+        )
+
+        assert result["status"] == "failed"
 
     def test_publish_derived_fundamental_empty(self):
         publisher, _, _ = _make_publisher()
@@ -351,6 +420,20 @@ class TestDataPublishers:
 
         assert result["status"] == "success"
         publisher.upload_fileobj.assert_called_once()
+
+    def test_publish_top_3000_upload_error(self):
+        publisher, _, _ = _make_publisher()
+        publisher.upload_fileobj = Mock(side_effect=RuntimeError("boom"))
+
+        result = publisher.publish_top_3000(
+            year=2024,
+            month=6,
+            as_of="2024-06-30",
+            symbols=["AAPL", "MSFT"],
+            source="test"
+        )
+
+        assert result["status"] == "failed"
 
     def test_publish_top_3000_empty(self):
         publisher, _, _ = _make_publisher()

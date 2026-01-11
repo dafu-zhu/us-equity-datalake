@@ -658,7 +658,7 @@ class DailyUpdateApp:
         self.logger.info(f"=" * 80)
 
 
-def main():
+def main() -> None:
     """Main entry point for daily update."""
     import argparse
 
@@ -687,13 +687,11 @@ def main():
 
     args = parser.parse_args()
 
-    # Parse target date
     if args.date:
         target_date = dt.datetime.strptime(args.date, '%Y-%m-%d').date()
     else:
-        target_date = None  # Will default to yesterday
+        target_date = None
 
-    # Run update
     app = DailyUpdateApp()
     app.run_daily_update(
         target_date=target_date,

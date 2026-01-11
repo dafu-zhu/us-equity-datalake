@@ -43,22 +43,3 @@ class UploadConfig:
         if self._config is None:
             raise ValueError("Failed to load configuration")
         return self._config.get('client', {})
-
-# Example usage
-if __name__ == "__main__":
-    config = UploadConfig()
-
-    print("=" * 60)
-    print("Storage Configuration")
-    print("=" * 60)
-
-    print(f"\nConfig path: {config.config_path}")
-    print(f"\nClient settings:")
-    print(f"  Region: {config.client.get('region_name')}")
-    print(f"  Max pool connections: {config.client.get('max_pool_connections')}")
-
-    print(f"\nTransfer settings:")
-    print(f"  Multipart threshold: {config.transfer.get('multipart_threshold')} bytes")
-    print(f"  Max concurrency: {config.transfer.get('max_concurrency')}")
-
-    print(f"\nNote: Fundamental data fields are managed via approved_mapping.yaml")

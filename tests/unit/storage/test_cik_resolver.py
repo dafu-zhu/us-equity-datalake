@@ -89,6 +89,49 @@ class TestCIKResolver:
 
         assert cik == "0000320193"
 
+    def test_get_cik_sec_mapping_exception_logs_debug(self):
+        """Logs debug when SEC mapping lookup fails."""
+        security_master = Mock()
+        security_master.get_security_id.return_value = "sid_1"
+        security_master.master_tb = self._make_master_tb("sid_1", 320193)
+        security_master._fetch_sec_cik_mapping.side_effect = RuntimeError("sec down")
+
+        logger = Mock()
+        resolver = CIKResolver(security_master=security_master, logger=logger)
+
+        cik = resolver.get_cik(symbol="AAPL", date="2025-06-30", year=2025)
+
+        assert cik == "320193"
+        logger.debug.assert_called()
+
+    def test_get_cik_value_error_logs_warning(self):
+        """Logs warning on unexpected ValueError from SecurityMaster."""
+        security_master = Mock()
+        security_master.get_security_id.side_effect = ValueError("boom")
+        security_master.master_tb = self._make_master_tb("sid_1", 320193)
+
+        logger = Mock()
+        resolver = CIKResolver(security_master=security_master, logger=logger)
+
+        cik = resolver.get_cik(symbol="AAPL", date="2024-06-30", year=2024)
+
+        assert cik is None
+        logger.warning.assert_called()
+
+    def test_get_cik_unexpected_exception_logs_error(self):
+        """Logs error on unexpected exceptions from SecurityMaster."""
+        security_master = Mock()
+        security_master.get_security_id.side_effect = RuntimeError("boom")
+        security_master.master_tb = self._make_master_tb("sid_1", 320193)
+
+        logger = Mock()
+        resolver = CIKResolver(security_master=security_master, logger=logger)
+
+        cik = resolver.get_cik(symbol="AAPL", date="2024-06-30", year=2024)
+
+        assert cik is None
+        logger.error.assert_called()
+
     def test_batch_prefetch_uses_cache(self):
         """Returns cached results without calling get_cik."""
         security_master = Mock()
