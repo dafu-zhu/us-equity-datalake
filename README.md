@@ -36,40 +36,41 @@ All data is stored in a flat-file structure on AWS S3, optimized for fast queryi
 ### Setup
 
 1. Clone the repository:
-```bash
-git clone https://github.com/dafu-zhu/us-equity-datalake.git
-cd us-equity-datalake
-```
+   ```bash
+   git clone https://github.com/dafu-zhu/us-equity-datalake.git
+   cd us-equity-datalake
+   ```
 
 2. Install dependencies using uv:
-```bash
-uv sync
-```
+   ```bash
+   uv sync
+   ```
 
 3. Configure environment variables (create `.env` file):
-```bash
-# WRDS Credentials
-WRDS_USERNAME=your_username
-WRDS_PASSWORD=your_password
+   ```bash
+   # WRDS Credentials
+   WRDS_USERNAME=your_username
+   WRDS_PASSWORD=your_password
+   
+   # Alpaca API Credentials
+   ALPACA_API_KEY=your_api_key
+   ALPACA_API_SECRET=your_secret_key
+   
+   # AWS Credentials (for S3 storage)
+   AWS_ACCESS_KEY_ID=your_access_key
+   AWS_SECRET_ACCESS_KEY=your_secret_key
+   
+   # SEC EDGAR API (required User-Agent)
+   SEC_USER_AGENT=your_name@example.com
+   ```
+4. Run
+   ```python
+   # Upload
+   uv run quantdl-storage
 
-# Alpaca API Credentials
-ALPACA_API_KEY=your_api_key
-ALPACA_API_SECRET=your_secret_key
-
-# AWS Credentials (for S3 storage)
-AWS_ACCESS_KEY_ID=your_access_key
-AWS_SECRET_ACCESS_KEY=your_secret_key
-
-# SEC EDGAR API (required User-Agent)
-SEC_USER_AGENT=your_name@example.com
-```
-
-## Quick Start
-
-```python
-# Upload
-uv run quantdl
-```
+   # Update
+   uv run quantdl-update
+   ```
 
 ## Project Structure
 
