@@ -58,22 +58,39 @@ class TestTicksDataCollector:
 
         # Should call CRSP for year < 2025
         assert mock_crsp.collect_daily_ticks.called
-        assert not mock_alpaca.get_daily_year.called
+        assert not mock_alpaca.fetch_daily_year_bulk.called
 
     def test_collect_daily_ticks_year_alpaca(self):
         """Test collecting daily ticks for year >= 2025 (uses Alpaca)"""
         from quantdl.storage.data_collectors import TicksDataCollector
+        from quantdl.collection.models import TickDataPoint
 
         mock_crsp = Mock()
         mock_alpaca = Mock()
-        mock_alpaca.get_daily_year.return_value = pl.DataFrame({
-            'timestamp': ['2025-01-01'],
-            'open': [100.0],
-            'high': [102.0],
-            'low': [99.0],
-            'close': [101.0],
-            'volume': [1000000]
-        })
+        mock_alpaca.fetch_daily_year_bulk.return_value = {
+            "AAPL": [{
+                "t": "2025-01-01T05:00:00Z",
+                "o": 100.0,
+                "h": 102.0,
+                "l": 99.0,
+                "c": 101.0,
+                "v": 1000000,
+                "n": 5000,
+                "vw": 100.5
+            }]
+        }
+        mock_alpaca.parse_ticks.return_value = [
+            TickDataPoint(
+                timestamp="2025-01-01T00:00:00",
+                open=100.0,
+                high=102.0,
+                low=99.0,
+                close=101.0,
+                volume=1000000,
+                num_trades=5000,
+                vwap=100.5
+            )
+        ]
         mock_logger = Mock(spec=logging.Logger)
 
         collector = TicksDataCollector(
@@ -87,11 +104,13 @@ class TestTicksDataCollector:
 
         # Should call Alpaca for year >= 2025
         assert not mock_crsp.collect_daily_ticks.called
-        mock_alpaca.get_daily_year.assert_called_once_with(
-            symbol='AAPL',
+        mock_alpaca.fetch_daily_year_bulk.assert_called_once_with(
+            symbols=['AAPL'],
             year=2025,
             adjusted=True
         )
+        assert len(result) == 1
+        assert result["close"][0] == 101.0
 
     def test_fetch_minute_month(self):
         """Test fetching minute data for month"""
@@ -148,7 +167,7 @@ class TestTicksDataCollector:
 
         mock_crsp = Mock()
         mock_alpaca = Mock()
-        mock_alpaca.get_daily_year.side_effect = Exception("boom")
+        mock_alpaca.fetch_daily_year_bulk.side_effect = Exception("boom")
         mock_logger = Mock(spec=logging.Logger)
 
         collector = TicksDataCollector(
@@ -161,6 +180,53 @@ class TestTicksDataCollector:
         result = collector.collect_daily_ticks_year("AAPL", 2025)
 
         assert result.is_empty()
+
+    def test_collect_daily_ticks_year_bulk_alpaca(self):
+        """Bulk Alpaca year fetch returns normalized DataFrames."""
+        from quantdl.storage.data_collectors import TicksDataCollector
+        from quantdl.collection.models import TickDataPoint
+
+        mock_crsp = Mock()
+        mock_alpaca = Mock()
+        mock_alpaca.fetch_daily_year_bulk.return_value = {
+            "AAPL": [{
+                "t": "2025-01-02T05:00:00Z",
+                "o": 150.0,
+                "h": 155.0,
+                "l": 149.0,
+                "c": 154.0,
+                "v": 1000,
+                "n": 5,
+                "vw": 153.0
+            }],
+            "MSFT": []
+        }
+        mock_alpaca.parse_ticks.return_value = [
+            TickDataPoint(
+                timestamp="2025-01-02T00:00:00",
+                open=150.0,
+                high=155.0,
+                low=149.0,
+                close=154.0,
+                volume=1000,
+                num_trades=5,
+                vwap=153.0
+            )
+        ]
+        mock_logger = Mock(spec=logging.Logger)
+
+        collector = TicksDataCollector(
+            crsp_ticks=mock_crsp,
+            alpaca_ticks=mock_alpaca,
+            alpaca_headers={},
+            logger=mock_logger
+        )
+
+        result = collector.collect_daily_ticks_year_bulk(["AAPL", "MSFT"], 2025)
+
+        mock_alpaca.fetch_daily_year_bulk.assert_called_once_with(["AAPL", "MSFT"], 2025, adjusted=True)
+        assert result["AAPL"]["close"][0] == 154.0
+        assert result["MSFT"].is_empty()
 
     def test_parse_minute_bars_to_daily_empty(self):
         """Empty bars -> empty frames for each day."""
@@ -253,7 +319,7 @@ class TestTicksDataCollector:
                 "vw": 105.5
             }
         ]
-        mock_alpaca.get_daily.return_value = june_bars
+        mock_alpaca.fetch_daily_month_bulk.return_value = {"AAPL": june_bars}
         mock_alpaca.parse_ticks.return_value = [
             TickDataPoint(
                 timestamp="2025-06-30T00:00:00",
@@ -277,9 +343,9 @@ class TestTicksDataCollector:
         # Test June (month=6) for year 2025 (uses Alpaca)
         result = collector.collect_daily_ticks_month("AAPL", 2025, 6)
 
-        # Verify get_daily() was called with month parameter (not get_daily_year())
-        mock_alpaca.get_daily.assert_called_once_with(
-            symbol="AAPL",
+        # Verify bulk month fetch
+        mock_alpaca.fetch_daily_month_bulk.assert_called_once_with(
+            symbols=["AAPL"],
             year=2025,
             month=6,
             adjusted=True
@@ -318,7 +384,7 @@ class TestTicksDataCollector:
         assert len(result) == 1
         assert result["timestamp"][0] == "2024-06-30"
         mock_crsp.collect_daily_ticks.assert_not_called()
-        mock_alpaca.get_daily.assert_not_called()
+        mock_alpaca.fetch_daily_month_bulk.assert_not_called()
 
     def test_collect_daily_ticks_month_empty_when_no_data(self):
         """Test that collect_daily_ticks_month returns empty when month has no data (Alpaca)"""
@@ -328,7 +394,7 @@ class TestTicksDataCollector:
         mock_alpaca = Mock()
 
         # Mock Alpaca's get_daily() to return empty data for requested month
-        mock_alpaca.get_daily.return_value = []
+        mock_alpaca.fetch_daily_month_bulk.return_value = {"AAPL": []}
 
         collector = TicksDataCollector(
             crsp_ticks=mock_crsp,
@@ -340,15 +406,67 @@ class TestTicksDataCollector:
         # Test June (month=6) for year 2025 which has no data
         result = collector.collect_daily_ticks_month("AAPL", 2025, 6)
 
-        # Verify get_daily() was called with month parameter
-        mock_alpaca.get_daily.assert_called_once_with(
-            symbol="AAPL",
+        # Verify bulk month fetch
+        mock_alpaca.fetch_daily_month_bulk.assert_called_once_with(
+            symbols=["AAPL"],
             year=2025,
             month=6,
             adjusted=True
         )
 
         assert result.is_empty()
+
+    def test_collect_daily_ticks_month_bulk_alpaca(self):
+        """Bulk month fetch returns normalized DataFrames for Alpaca years."""
+        from quantdl.storage.data_collectors import TicksDataCollector
+        from quantdl.collection.models import TickDataPoint
+
+        mock_crsp = Mock()
+        mock_alpaca = Mock()
+        mock_alpaca.fetch_daily_month_bulk.return_value = {
+            "AAPL": [{
+                "t": "2025-06-30T05:00:00Z",
+                "o": 200.0,
+                "h": 210.0,
+                "l": 195.0,
+                "c": 205.0,
+                "v": 2000,
+                "n": 10,
+                "vw": 204.0
+            }],
+            "MSFT": []
+        }
+        mock_alpaca.parse_ticks.return_value = [
+            TickDataPoint(
+                timestamp="2025-06-30T00:00:00",
+                open=200.0,
+                high=210.0,
+                low=195.0,
+                close=205.0,
+                volume=2000,
+                num_trades=10,
+                vwap=204.0
+            )
+        ]
+
+        collector = TicksDataCollector(
+            crsp_ticks=mock_crsp,
+            alpaca_ticks=mock_alpaca,
+            alpaca_headers={},
+            logger=Mock(spec=logging.Logger)
+        )
+
+        result = collector.collect_daily_ticks_month_bulk(["AAPL", "MSFT"], 2025, 6, sleep_time=0.0)
+
+        mock_alpaca.fetch_daily_month_bulk.assert_called_once_with(
+            symbols=["AAPL", "MSFT"],
+            year=2025,
+            month=6,
+            sleep_time=0.0,
+            adjusted=True
+        )
+        assert result["AAPL"]["close"][0] == 205.0
+        assert result["MSFT"].is_empty()
 
     def test_collect_daily_ticks_month_crsp(self):
         """Test that collect_daily_ticks_month calls CRSP API for years < 2025"""
@@ -854,7 +972,7 @@ class TestDataCollectorsOrchestrator:
         from quantdl.storage.data_collectors import DataCollectors
 
         mock_alpaca = Mock()
-        mock_alpaca.get_daily_year.return_value = pl.DataFrame()
+        mock_alpaca.fetch_daily_year_bulk.return_value = {}
         mock_logger = Mock(spec=logging.Logger)
 
         orchestrator = DataCollectors(
@@ -868,7 +986,27 @@ class TestDataCollectorsOrchestrator:
         orchestrator.collect_daily_ticks_year('AAPL', 2025)
 
         # Should delegate to ticks_collector
-        mock_alpaca.get_daily_year.assert_called_once()
+        mock_alpaca.fetch_daily_year_bulk.assert_called_once()
+
+    def test_delegation_to_ticks_collector_month_bulk(self):
+        """Delegates bulk month fetch to TicksDataCollector."""
+        from quantdl.storage.data_collectors import DataCollectors
+
+        mock_logger = Mock(spec=logging.Logger)
+        orchestrator = DataCollectors(
+            crsp_ticks=Mock(),
+            alpaca_ticks=Mock(),
+            alpaca_headers={},
+            logger=mock_logger
+        )
+
+        orchestrator.ticks_collector.collect_daily_ticks_month_bulk = Mock(return_value={})
+
+        orchestrator.collect_daily_ticks_month_bulk(["AAPL"], 2025, 6, sleep_time=0.1)
+
+        orchestrator.ticks_collector.collect_daily_ticks_month_bulk.assert_called_once_with(
+            ["AAPL"], 2025, 6, 0.1
+        )
 
     def test_delegation_to_fundamental_collector(self):
         """Test DataCollectors delegates to FundamentalDataCollector"""

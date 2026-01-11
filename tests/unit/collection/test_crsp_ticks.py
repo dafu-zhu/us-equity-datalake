@@ -395,6 +395,25 @@ class TestGetDailyRange:
     @patch('quantdl.collection.crsp_ticks.validate_permno')
     @patch('quantdl.collection.crsp_ticks.SecurityMaster')
     @patch('quantdl.collection.crsp_ticks.setup_logger')
+    def test_get_daily_range_security_id_none(self, mock_logger, mock_security_master, mock_validate_permno, mock_validate_date):
+        """Test get_daily_range raises when security_id is None."""
+        mock_conn = Mock()
+
+        mock_sm_instance = Mock()
+        mock_sm_instance.get_security_id.return_value = None
+        mock_security_master.return_value = mock_sm_instance
+
+        crsp = CRSPDailyTicks(conn=mock_conn)
+
+        with pytest.raises(ValueError, match="security_id is None"):
+            crsp.get_daily_range(symbol='AAPL', start_day='2024-06-01', end_day='2024-06-30')
+
+        mock_validate_permno.assert_not_called()
+
+    @patch('quantdl.collection.crsp_ticks.validate_date_string')
+    @patch('quantdl.collection.crsp_ticks.validate_permno')
+    @patch('quantdl.collection.crsp_ticks.SecurityMaster')
+    @patch('quantdl.collection.crsp_ticks.setup_logger')
     def test_get_daily_range_skip_missing_data(self, mock_logger, mock_security_master, mock_validate_permno, mock_validate_date):
         """Test that rows with missing OHLCV are skipped"""
         mock_conn = Mock()
@@ -1014,6 +1033,83 @@ class TestCollectDailyTicksDecember:
 
         # Verify auto_resolve was passed correctly
         assert mock_sm_instance.get_security_id.call_args[1]['auto_resolve'] is False
+
+    @patch('quantdl.collection.crsp_ticks.align_calendar')
+    @patch('quantdl.collection.crsp_ticks.SecurityMaster')
+    @patch('quantdl.collection.crsp_ticks.setup_logger')
+    def test_collect_daily_ticks_empty(self, mock_logger, mock_security_master, mock_align_calendar):
+        """Test collect_daily_ticks returns empty list when no data."""
+        mock_conn = Mock()
+
+        crsp = CRSPDailyTicks(conn=mock_conn)
+        crsp.get_daily_range = Mock(return_value=[])
+
+        result = crsp.collect_daily_ticks('AAPL', 2024, 6)
+
+        assert result == []
+        mock_align_calendar.assert_not_called()
+
+
+class TestCollectDailyTicksYearBulk:
+    """Test collect_daily_ticks_year_bulk method."""
+
+    @patch('quantdl.collection.crsp_ticks.validate_date_string')
+    @patch('quantdl.collection.crsp_ticks.validate_permno')
+    @patch('quantdl.collection.crsp_ticks.SecurityMaster')
+    @patch('quantdl.collection.crsp_ticks.setup_logger')
+    def test_collect_daily_ticks_year_bulk_basic(self, mock_logger, mock_security_master, mock_validate_permno, mock_validate_date):
+        """Bulk fetch returns per-symbol dataframes with formatted timestamps."""
+        import polars as pl
+
+        mock_conn = Mock()
+        mock_sm_instance = Mock()
+
+        end_day = "2024-12-31"
+        date_check = pd.Timestamp(end_day).date()
+
+        mock_sm_instance.master_tb = pl.DataFrame({
+            "symbol": ["AAPL"],
+            "start_date": [pd.Timestamp("2000-01-01").date()],
+            "end_date": [date_check],
+            "security_id": ["sid_1"]
+        })
+        mock_sm_instance.security_map = Mock(return_value=pl.DataFrame({
+            "security_id": ["sid_1"],
+            "permno": [10516]
+        }))
+        mock_sm_instance.get_security_id = Mock()
+        mock_security_master.return_value = mock_sm_instance
+
+        mock_validate_permno.return_value = 10516
+        mock_validate_date.side_effect = lambda x: x
+
+        mock_conn.raw_sql.return_value = pd.DataFrame({
+            "permno": [10516],
+            "date": [pd.Timestamp("2024-06-30")],
+            "open": [100.0],
+            "high": [105.0],
+            "low": [99.0],
+            "close": [103.0],
+            "volume": [1000000]
+        })
+
+        crsp = CRSPDailyTicks(conn=mock_conn)
+        result = crsp.collect_daily_ticks_year_bulk(["AAPL"], 2024, adjusted=True, auto_resolve=True)
+
+        assert "AAPL" in result
+        assert result["AAPL"]["timestamp"][0] == "2024-06-30"
+        mock_sm_instance.get_security_id.assert_not_called()
+
+    @patch('quantdl.collection.crsp_ticks.SecurityMaster')
+    @patch('quantdl.collection.crsp_ticks.setup_logger')
+    def test_collect_daily_ticks_year_bulk_close(self, mock_logger, mock_security_master):
+        """Close closes the WRDS connection."""
+        mock_conn = Mock()
+
+        crsp = CRSPDailyTicks(conn=mock_conn)
+        crsp.close()
+
+        mock_conn.close.assert_called_once()
 
 
 class TestGetDailyValidation:

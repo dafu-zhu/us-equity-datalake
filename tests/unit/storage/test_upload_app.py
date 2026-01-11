@@ -17,6 +17,7 @@ def _make_app():
     app.validator = Mock()
     app.data_collectors = Mock()
     app.data_publishers = Mock()
+    app.data_collectors.ticks_collector = Mock(alpaca_start_year=2025)
     app.universe_manager = Mock()
     app.calendar = Mock()
     app.cik_resolver = Mock()
@@ -631,6 +632,115 @@ class TestUploadApp:
 
         app.data_publishers.publish_top_3000.assert_not_called()
 
+    def test_upload_daily_ticks_monthly_bulk_alpaca(self):
+        """Alpaca monthly bulk path uses collect_daily_ticks_month_bulk."""
+        app = _make_app()
+        app.data_collectors.ticks_collector.alpaca_start_year = 2025
+        app.universe_manager.load_symbols_for_year.return_value = ["AAPL"]
+        app.validator.data_exists.return_value = False
+        app.data_collectors.collect_daily_ticks_month_bulk.return_value = {
+            "AAPL": pl.DataFrame({
+                "timestamp": ["2025-06-30"],
+                "open": [100.0],
+                "high": [110.0],
+                "low": [95.0],
+                "close": [105.0],
+                "volume": [1000]
+            })
+        }
+        app.data_publishers.publish_daily_ticks.return_value = {"status": "success", "error": None}
+
+        app.upload_daily_ticks(2025, use_monthly_partitions=True, by_year=False, chunk_size=1, sleep_time=0.5)
+
+        app.data_collectors.collect_daily_ticks_month_bulk.assert_any_call(
+            ["AAPL"], 2025, 1, sleep_time=0.5
+        )
+        app.data_publishers.publish_daily_ticks.assert_called()
+
+    def test_upload_daily_ticks_alpaca_by_year_ignored(self):
+        """by_year=True is ignored for Alpaca years and uses bulk monthly fetch."""
+        app = _make_app()
+        app.data_collectors.ticks_collector.alpaca_start_year = 2025
+        app.universe_manager.load_symbols_for_year.return_value = ["AAPL"]
+        app.validator.data_exists.return_value = False
+        app.data_collectors.collect_daily_ticks_month_bulk.return_value = {
+            "AAPL": pl.DataFrame({
+                "timestamp": ["2025-06-30"],
+                "open": [100.0],
+                "high": [110.0],
+                "low": [95.0],
+                "close": [105.0],
+                "volume": [1000]
+            })
+        }
+        app.data_publishers.publish_daily_ticks.return_value = {"status": "success", "error": None}
+
+        app.upload_daily_ticks(2025, use_monthly_partitions=True, by_year=True, chunk_size=1, sleep_time=0.0)
+
+        app.data_collectors.collect_daily_ticks_year_bulk.assert_not_called()
+        app.data_collectors.collect_daily_ticks_month_bulk.assert_called()
+
+    def test_upload_daily_ticks_yearly_bulk_alpaca(self):
+        """Alpaca yearly bulk path uses collect_daily_ticks_year_bulk."""
+        app = _make_app()
+        app.data_collectors.ticks_collector.alpaca_start_year = 2025
+        app.universe_manager.load_symbols_for_year.return_value = ["AAPL", "MSFT"]
+        app.validator.data_exists.return_value = False
+        app.data_collectors.collect_daily_ticks_year_bulk.return_value = {
+            "AAPL": pl.DataFrame({"timestamp": ["2025-01-02"], "open": [1], "high": [1], "low": [1], "close": [1], "volume": [1]}),
+            "MSFT": pl.DataFrame({"timestamp": ["2025-01-02"], "open": [2], "high": [2], "low": [2], "close": [2], "volume": [2]})
+        }
+        app.data_publishers.publish_daily_ticks.return_value = {"status": "success", "error": None}
+
+        app.upload_daily_ticks(2025, use_monthly_partitions=False, chunk_size=2)
+
+        app.data_collectors.collect_daily_ticks_year_bulk.assert_called_once_with(["AAPL", "MSFT"], 2025)
+        assert app.data_publishers.publish_daily_ticks.call_count == 2
+
+    def test_upload_daily_ticks_monthly_alpaca_skips_existing(self):
+        """Monthly Alpaca bulk path skips when all data exists."""
+        app = _make_app()
+        app.data_collectors.ticks_collector.alpaca_start_year = 2025
+        app.universe_manager.load_symbols_for_year.return_value = ["AAPL"]
+        app.validator.data_exists.return_value = True
+
+        app.upload_daily_ticks(2025, use_monthly_partitions=True, by_year=False, chunk_size=1, sleep_time=0.0)
+
+        app.data_collectors.collect_daily_ticks_month_bulk.assert_not_called()
+        app.data_publishers.publish_daily_ticks.assert_not_called()
+
+    def test_upload_daily_ticks_yearly_alpaca_skips_existing(self):
+        """Yearly Alpaca bulk path skips when all data exists."""
+        app = _make_app()
+        app.data_collectors.ticks_collector.alpaca_start_year = 2025
+        app.universe_manager.load_symbols_for_year.return_value = ["AAPL"]
+        app.validator.data_exists.return_value = True
+
+        app.upload_daily_ticks(2025, use_monthly_partitions=False, chunk_size=1)
+
+        app.data_collectors.collect_daily_ticks_year_bulk.assert_not_called()
+        app.data_publishers.publish_daily_ticks.assert_not_called()
+
+    def test_upload_top_3000_monthly_uses_alpaca_start_year(self):
+        """Top3000 source uses alpaca_start_year threshold."""
+        app = _make_app()
+        app.data_collectors.ticks_collector.alpaca_start_year = 2025
+        app.universe_manager.load_symbols_for_year.return_value = ["AAPL"]
+        app.validator.top_3000_exists.return_value = False
+        app.calendar.load_trading_days.return_value = ["2024-06-28"]
+        app.universe_manager.get_top_3000.return_value = ["AAPL"]
+        app.data_publishers.publish_top_3000.return_value = {"status": "success"}
+
+        class FixedDate(dt.date):
+            @classmethod
+            def today(cls):
+                return cls(2024, 7, 1)
+
+        with patch('quantdl.storage.app.dt.date', FixedDate):
+            app.upload_top_3000_monthly(2024, overwrite=False, auto_resolve=True)
+
+        app.data_publishers.publish_top_3000.assert_called()
+
     def test_run_invokes_selected_flows(self):
         app = _make_app()
         app.upload_fundamental = Mock()
@@ -686,6 +796,44 @@ class TestUploadApp:
         )
 
         assert app.upload_minute_ticks.call_count == 12
+
+    def test_run_passes_daily_chunk_and_sleep(self):
+        app = _make_app()
+        app.upload_daily_ticks = Mock()
+
+        app.run(
+            start_year=2025,
+            end_year=2025,
+            max_workers=1,
+            overwrite=False,
+            daily_chunk_size=123,
+            daily_sleep_time=0.12,
+            run_daily_ticks=True,
+            run_minute_ticks=False
+        )
+
+        app.upload_daily_ticks.assert_called_once_with(
+            2025,
+            False,
+            by_year=True,
+            chunk_size=123,
+            sleep_time=0.12
+        )
+
+    def test_run_respects_minute_ticks_start_year(self):
+        app = _make_app()
+        app.upload_minute_ticks = Mock()
+
+        app.run(
+            start_year=2018,
+            end_year=2018,
+            max_workers=1,
+            overwrite=False,
+            minute_ticks_start_year=2019,
+            run_minute_ticks=True
+        )
+
+        app.upload_minute_ticks.assert_not_called()
 
     def test_upload_minute_ticks_handles_fetch_error(self):
         app = _make_app()

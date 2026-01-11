@@ -205,6 +205,17 @@ class TestSymbolNormalizer:
 
         assert result == ['AAPL', 'BRK.B']
 
+    @patch('quantdl.master.security_master.fetch_all_stocks')
+    @patch('quantdl.master.security_master.setup_logger')
+    def test_to_nasdaq_format_with_day_no_security_master(self, mock_logger, mock_fetch):
+        """Date context without SecurityMaster uses Nasdaq format."""
+        mock_stocks = pl.DataFrame({'Ticker': ['BRK.B']})
+        mock_fetch.return_value = mock_stocks
+
+        normalizer = SymbolNormalizer(security_master=None)
+
+        assert normalizer.to_nasdaq_format('BRKB', day='2024-01-01') == 'BRK.B'
+
     def test_to_crsp_format(self):
         """Test to_crsp_format static method"""
         # Test various input formats
@@ -213,6 +224,11 @@ class TestSymbolNormalizer:
         assert SymbolNormalizer.to_crsp_format('ABC.D.E') == 'ABCDE'
         assert SymbolNormalizer.to_crsp_format('AAPL') == 'AAPL'
         assert SymbolNormalizer.to_crsp_format('aapl') == 'AAPL'
+
+    def test_to_sec_format(self):
+        """Test to_sec_format static method"""
+        assert SymbolNormalizer.to_sec_format('BRK.B') == 'BRK-B'
+        assert SymbolNormalizer.to_sec_format('aapl') == 'AAPL'
 
     @patch('quantdl.master.security_master.fetch_all_stocks')
     @patch('quantdl.master.security_master.setup_logger')
@@ -331,6 +347,20 @@ class TestSecurityMaster:
         assert result == 101
         sm.auto_resolve.assert_not_called()
 
+    def test_get_security_id_rejects_none_security_id(self):
+        master_tb = pl.DataFrame({
+            'security_id': [None],
+            'symbol': ['AAA'],
+            'start_date': [dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2020, 12, 31)]
+        })
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.master_tb = master_tb
+        sm.logger = Mock()
+
+        with pytest.raises(ValueError, match="security_id is None"):
+            sm.get_security_id('AAA', '2020-06-30', auto_resolve=False)
+
     def test_auto_resolve_selects_closest_symbol_usage(self):
         master_tb = pl.DataFrame({
             'security_id': [1, 1, 2],
@@ -428,6 +458,24 @@ class TestSecurityMaster:
         assert result == 101
         sm.logger.warning.assert_not_called()
 
+    def test_auto_resolve_logs_error_on_sid_to_info_failure(self):
+        master_tb = pl.DataFrame({
+            'security_id': [101],
+            'symbol': ['AAA'],
+            'company': ['TestCo'],
+            'start_date': [dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2020, 12, 31)]
+        })
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.master_tb = master_tb
+        sm.logger = Mock()
+        sm.sid_to_info = Mock(side_effect=RuntimeError("boom"))
+
+        result = sm.auto_resolve('AAA', '2020-06-30')
+
+        assert result == 101
+        sm.logger.error.assert_called_once()
+
     def test_auto_resolve_no_active_security(self):
         master_tb = pl.DataFrame({
             'security_id': [101],
@@ -499,6 +547,7 @@ class TestSecurityMaster:
             result = sm._fetch_sec_cik_mapping()
 
         assert result.is_empty()
+        assert set(result.columns) == {"ticker", "cik"}
 
     def test_fetch_sec_cik_mapping_filters_zero_cik(self):
         sm = SecurityMaster.__new__(SecurityMaster)
@@ -631,6 +680,24 @@ class TestSecurityMaster:
 
         sec_ids = result.select('security_id').unique().to_series().to_list()
         assert len(sec_ids) == 1
+
+    def test_security_map_new_business_on_permno_change(self):
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+        sm.cik_cusip = pl.DataFrame({
+            'permno': [1, 2],
+            'symbol': ['AAA', 'AAA'],
+            'company': ['AAA Corp', 'AAA Corp'],
+            'cik': ['0001', '0001'],
+            'cusip': ['11111111', '11111111'],
+            'start_date': [dt.date(2020, 1, 1), dt.date(2021, 1, 1)],
+            'end_date': [dt.date(2020, 12, 31), dt.date(2021, 12, 31)]
+        })
+
+        result = sm.security_map()
+
+        sec_ids = result.select('security_id').unique().to_series().to_list()
+        assert len(sec_ids) == 2
 
     def test_master_table_includes_security_id(self):
         sm = SecurityMaster.__new__(SecurityMaster)

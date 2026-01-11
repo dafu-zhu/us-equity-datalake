@@ -461,11 +461,14 @@ class TestGetDaily:
 
     @patch.dict('os.environ', {'ALPACA_API_KEY': 'test_key', 'ALPACA_API_SECRET': 'test_secret'})
     @patch('quantdl.collection.alpaca_ticks.LoggerFactory')
-    @patch('quantdl.collection.alpaca_ticks.requests.get')
-    def test_get_daily_success(self, mock_get, mock_logger_factory):
+    @patch('quantdl.collection.alpaca_ticks.requests.Session')
+    def test_get_daily_success(self, mock_session_class, mock_logger_factory):
         """Test successful daily data retrieval"""
         mock_logger = Mock()
         mock_logger_factory.return_value.get_logger.return_value = mock_logger
+
+        mock_session = Mock()
+        mock_session_class.return_value = mock_session
 
         mock_response = Mock()
         mock_response.status_code = 200
@@ -483,9 +486,10 @@ class TestGetDaily:
                         'vw': 100.25
                     }
                 ]
-            }
+            },
+            'next_page_token': None
         }
-        mock_get.return_value = mock_response
+        mock_session.get.return_value = mock_response
 
         ticks = Ticks()
         result = ticks.get_daily('AAPL', 2024, 1)
@@ -499,11 +503,14 @@ class TestGetDailyYear:
 
     @patch.dict('os.environ', {'ALPACA_API_KEY': 'test_key', 'ALPACA_API_SECRET': 'test_secret'})
     @patch('quantdl.collection.alpaca_ticks.LoggerFactory')
-    @patch('quantdl.collection.alpaca_ticks.requests.get')
-    def test_get_daily_year_success(self, mock_get, mock_logger_factory):
+    @patch('quantdl.collection.alpaca_ticks.requests.Session')
+    def test_get_daily_year_success(self, mock_session_class, mock_logger_factory):
         """Test successful yearly data retrieval"""
         mock_logger = Mock()
         mock_logger_factory.return_value.get_logger.return_value = mock_logger
+
+        mock_session = Mock()
+        mock_session_class.return_value = mock_session
 
         mock_response = Mock()
         mock_response.status_code = 200
@@ -521,9 +528,10 @@ class TestGetDailyYear:
                         'vw': 100.25
                     }
                 ]
-            }
+            },
+            'next_page_token': None
         }
-        mock_get.return_value = mock_response
+        mock_session.get.return_value = mock_response
 
         ticks = Ticks()
         result = ticks.get_daily_year('AAPL', 2024)
@@ -534,16 +542,19 @@ class TestGetDailyYear:
 
     @patch.dict('os.environ', {'ALPACA_API_KEY': 'test_key', 'ALPACA_API_SECRET': 'test_secret'})
     @patch('quantdl.collection.alpaca_ticks.LoggerFactory')
-    @patch('quantdl.collection.alpaca_ticks.requests.get')
-    def test_get_daily_year_empty(self, mock_get, mock_logger_factory):
+    @patch('quantdl.collection.alpaca_ticks.requests.Session')
+    def test_get_daily_year_empty(self, mock_session_class, mock_logger_factory):
         """Test yearly data with no results"""
         mock_logger = Mock()
         mock_logger_factory.return_value.get_logger.return_value = mock_logger
 
+        mock_session = Mock()
+        mock_session_class.return_value = mock_session
+
         mock_response = Mock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {'bars': {}}
-        mock_get.return_value = mock_response
+        mock_response.json.return_value = {'bars': {}, 'next_page_token': None}
+        mock_session.get.return_value = mock_response
 
         ticks = Ticks()
         result = ticks.get_daily_year('AAPL', 2024)
