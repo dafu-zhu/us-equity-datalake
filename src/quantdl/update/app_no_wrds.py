@@ -212,7 +212,7 @@ class DailyUpdateAppNoWRDS:
         df = fetch_all_stocks(with_filter=True, refresh=True, logger=self.logger)
 
         # Convert to Alpaca format (symbols as-is from Nasdaq)
-        symbols = df['Symbol'].tolist()
+        symbols = df['Ticker'].tolist()
         self._symbols_cache = symbols
 
         self.logger.info(f"Loaded {len(symbols)} symbols from Nasdaq")
