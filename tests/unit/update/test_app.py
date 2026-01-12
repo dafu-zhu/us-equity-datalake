@@ -1962,6 +1962,84 @@ class TestParallelFilingChecks:
         'ALPACA_API_KEY': 'test_key',
         'ALPACA_API_SECRET': 'test_secret'
     })
+    def test_check_filing_filters_non_10k_10q(
+        self, mock_config, mock_s3, mock_logger, mock_calendar,
+        mock_ticks, mock_crsp, mock_rate_limiter, mock_cik_resolver,
+        mock_collectors, mock_publishers, mock_sec_client, mock_universe
+    ):
+        """Test _check_filing filters out non-10K/10Q forms (e.g., 8-K)"""
+        from quantdl.update.app import DailyUpdateApp
+        from threading import Semaphore
+
+        app = DailyUpdateApp(config_path="test_config.yaml")
+        # Mock returns 8-K filing (should be filtered out)
+        app.get_recent_edgar_filings = Mock(return_value=[
+            {'form': '8-K', 'filingDate': '2024-06-30'}
+        ])
+
+        semaphore = Semaphore(10)
+        result = app._check_filing("AAPL", "0000320193", 7, semaphore)
+
+        assert result['symbol'] == "AAPL"
+        assert result['cik'] == "0000320193"
+        assert result['has_recent_filing'] is False  # 8-K should not trigger
+
+    @patch('quantdl.update.app.UniverseManager')
+    @patch('quantdl.update.app.SECClient')
+    @patch('quantdl.update.app.DataPublishers')
+    @patch('quantdl.update.app.DataCollectors')
+    @patch('quantdl.update.app.CIKResolver')
+    @patch('quantdl.update.app.RateLimiter')
+    @patch('quantdl.update.app.CRSPDailyTicks')
+    @patch('quantdl.update.app.Ticks')
+    @patch('quantdl.update.app.TradingCalendar')
+    @patch('quantdl.update.app.setup_logger')
+    @patch('quantdl.update.app.S3Client')
+    @patch('quantdl.update.app.UploadConfig')
+    @patch.dict('os.environ', {
+        'ALPACA_API_KEY': 'test_key',
+        'ALPACA_API_SECRET': 'test_secret'
+    })
+    def test_check_filing_mixed_forms(
+        self, mock_config, mock_s3, mock_logger, mock_calendar,
+        mock_ticks, mock_crsp, mock_rate_limiter, mock_cik_resolver,
+        mock_collectors, mock_publishers, mock_sec_client, mock_universe
+    ):
+        """Test _check_filing with mix of 10-K and non-qualifying forms"""
+        from quantdl.update.app import DailyUpdateApp
+        from threading import Semaphore
+
+        app = DailyUpdateApp(config_path="test_config.yaml")
+        # Mock returns mix of forms - should filter to only 10-K
+        app.get_recent_edgar_filings = Mock(return_value=[
+            {'form': '8-K', 'filingDate': '2024-06-28'},
+            {'form': '10-K', 'filingDate': '2024-06-30'},
+            {'form': '4', 'filingDate': '2024-06-29'}
+        ])
+
+        semaphore = Semaphore(10)
+        result = app._check_filing("AAPL", "0000320193", 7, semaphore)
+
+        assert result['symbol'] == "AAPL"
+        assert result['cik'] == "0000320193"
+        assert result['has_recent_filing'] is True  # 10-K should trigger
+
+    @patch('quantdl.update.app.UniverseManager')
+    @patch('quantdl.update.app.SECClient')
+    @patch('quantdl.update.app.DataPublishers')
+    @patch('quantdl.update.app.DataCollectors')
+    @patch('quantdl.update.app.CIKResolver')
+    @patch('quantdl.update.app.RateLimiter')
+    @patch('quantdl.update.app.CRSPDailyTicks')
+    @patch('quantdl.update.app.Ticks')
+    @patch('quantdl.update.app.TradingCalendar')
+    @patch('quantdl.update.app.setup_logger')
+    @patch('quantdl.update.app.S3Client')
+    @patch('quantdl.update.app.UploadConfig')
+    @patch.dict('os.environ', {
+        'ALPACA_API_KEY': 'test_key',
+        'ALPACA_API_SECRET': 'test_secret'
+    })
     def test_get_symbols_with_recent_filings_parallel(
         self, mock_config, mock_s3, mock_logger, mock_calendar,
         mock_ticks, mock_crsp, mock_rate_limiter, mock_cik_resolver_class,

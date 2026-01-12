@@ -188,6 +188,7 @@ class DailyUpdateApp:
     def _check_filing(self, symbol: str, cik: str, lookback_days: int, semaphore: Semaphore) -> Dict:
         """
         Check if a symbol has recent filings (helper for parallel execution)
+        Only 10-K and 10-Q forms trigger updates.
 
         :param symbol: Symbol to check
         :param cik: CIK for the symbol
@@ -199,13 +200,16 @@ class DailyUpdateApp:
             time.sleep(0.1)  # Rate limit: 10 req/sec (0.1s between requests)
             recent_filings = self.get_recent_edgar_filings(cik, lookback_days)
 
-            if recent_filings:
+            # Filter to only 10-K and 10-Q forms
+            relevant_filings = [f for f in recent_filings if f['form'] in ('10-K', '10-Q')]
+
+            if relevant_filings:
                 self.logger.debug(
-                    f"{symbol} (CIK {cik}): {len(recent_filings)} recent filings - "
-                    f"{[f['form'] for f in recent_filings]}"
+                    f"{symbol} (CIK {cik}): {len(relevant_filings)} recent 10-K/10-Q filings - "
+                    f"{[f['form'] for f in relevant_filings]}"
                 )
 
-            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': len(recent_filings) > 0}
+            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': len(relevant_filings) > 0}
 
     def get_symbols_with_recent_filings(
         self,
