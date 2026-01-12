@@ -42,7 +42,10 @@ class TestS3Client:
                 mock_config_instance.load.return_value = config
                 mock_config_class.return_value = mock_config_instance
 
-                client = S3Client(config_path=config_path)
+                s3_client_wrapper = S3Client(config_path=config_path)
+
+                # Access the client property to trigger boto3.client call
+                _ = s3_client_wrapper.client
 
                 # Verify boto3.client was called
                 assert mock_boto_client.called
@@ -85,7 +88,10 @@ class TestS3Client:
                 mock_config_instance.load.return_value = config
                 mock_config_class.return_value = mock_config_instance
 
-                client = S3Client(config_path=config_path)
+                s3_client_wrapper = S3Client(config_path=config_path)
+
+                # Access the client property to trigger boto3.client call
+                _ = s3_client_wrapper.client
 
                 call_kwargs = mock_boto_client.call_args[1]
                 boto_config = call_kwargs['config']
@@ -117,7 +123,10 @@ class TestS3Client:
                 mock_config_instance.load.return_value = config
                 mock_config_class.return_value = mock_config_instance
 
-                client = S3Client(config_path=config_path)
+                s3_client_wrapper = S3Client(config_path=config_path)
+
+                # Access the client property to trigger boto3.client call
+                _ = s3_client_wrapper.client
 
                 call_kwargs = mock_boto_client.call_args[1]
                 boto_config = call_kwargs['config']
@@ -149,7 +158,10 @@ class TestS3Client:
                 mock_config_instance.load.return_value = config
                 mock_config_class.return_value = mock_config_instance
 
-                client = S3Client(config_path=config_path)
+                s3_client_wrapper = S3Client(config_path=config_path)
+
+                # Access the client property to trigger boto3.client call
+                _ = s3_client_wrapper.client
 
                 call_kwargs = mock_boto_client.call_args[1]
                 boto_config = call_kwargs['config']
@@ -181,7 +193,10 @@ class TestS3Client:
                 mock_config_instance.load.return_value = config
                 mock_config_class.return_value = mock_config_instance
 
-                client = S3Client(config_path=config_path)
+                s3_client_wrapper = S3Client(config_path=config_path)
+
+                # Access the client property to trigger boto3.client call
+                _ = s3_client_wrapper.client
 
                 call_kwargs = mock_boto_client.call_args[1]
                 boto_config = call_kwargs['config']
@@ -213,7 +228,10 @@ class TestS3Client:
                 mock_config_instance.load.return_value = config
                 mock_config_class.return_value = mock_config_instance
 
-                client = S3Client(config_path=config_path)
+                s3_client_wrapper = S3Client(config_path=config_path)
+
+                # Access the client property to trigger boto3.client call
+                _ = s3_client_wrapper.client
 
                 call_kwargs = mock_boto_client.call_args[1]
                 boto_config = call_kwargs['config']

@@ -99,7 +99,15 @@ class Validator:
                     if data_type == "fundamental":
                         continue
                     if len(parts) >= 6 and data_type in parts:
-                        year = int(parts[-2])
+                        # Handle both yearly and monthly partitions
+                        # Yearly: .../SYMBOL/2023/ticks.parquet (parts[-2] = year)
+                        # Monthly: .../SYMBOL/2023/01/ticks.parquet (parts[-3] = year)
+                        year_candidate = int(parts[-2])
+                        if year_candidate >= 2000 and year_candidate <= 2100:
+                            year = year_candidate
+                        else:
+                            # Monthly partition - year is one level up
+                            year = int(parts[-3])
                         if year not in years:
                             years.append(year)
 

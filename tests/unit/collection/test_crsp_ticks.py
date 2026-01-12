@@ -1335,7 +1335,13 @@ class TestRecentDailyTicksChunking:
         filtered_mock.select.return_value = selected_mock
         selected_mock.unique.return_value = unique_mock
         unique_mock.filter.return_value = final_mock
-        final_mock.__getitem__.return_value.to_list.return_value = ['AAPL']
+
+        # Setup column access mocks for master_tb resolution
+        symbol_col_mock = Mock()
+        symbol_col_mock.to_list.return_value = ['AAPL']
+        sid_col_mock = Mock()
+        sid_col_mock.to_list.return_value = ['sid_123']
+        final_mock.__getitem__.side_effect = lambda col: symbol_col_mock if col == 'symbol' else sid_col_mock
 
         mock_sm_instance.master_tb = mock_master_tb
         mock_sm_instance.get_security_id.return_value = 'sid_123'
@@ -1348,7 +1354,13 @@ class TestRecentDailyTicksChunking:
         security_map_mock.filter.return_value = security_map_filtered
         security_map_filtered.select.return_value = security_map_selected
         security_map_selected.unique.return_value = security_map_unique
-        security_map_unique.__getitem__.return_value.to_list.return_value = ['sid_123']
+
+        # Setup column access mocks for security_map resolution
+        sid_col_mock2 = Mock()
+        sid_col_mock2.to_list.return_value = ['sid_123']
+        permno_col_mock = Mock()
+        permno_col_mock.to_list.return_value = [10516]
+        security_map_unique.__getitem__.side_effect = lambda col: sid_col_mock2 if col == 'security_id' else permno_col_mock
 
         mock_sm_instance.security_map.return_value = security_map_mock
         mock_sm_instance.sid_to_permno.return_value = 10516
@@ -1414,7 +1426,13 @@ class TestRecentDailyTicksChunking:
         filtered_mock.select.return_value = selected_mock
         selected_mock.unique.return_value = unique_mock
         unique_mock.filter.return_value = final_mock
-        final_mock.__getitem__.return_value.to_list.return_value = ['AAPL']
+
+        # Setup column access mocks for master_tb resolution
+        symbol_col_mock = Mock()
+        symbol_col_mock.to_list.return_value = ['AAPL']
+        sid_col_mock = Mock()
+        sid_col_mock.to_list.return_value = ['sid_123']
+        final_mock.__getitem__.side_effect = lambda col: symbol_col_mock if col == 'symbol' else sid_col_mock
 
         mock_sm_instance.master_tb = mock_master_tb
         mock_sm_instance.get_security_id.return_value = 'sid_123'
@@ -1427,7 +1445,13 @@ class TestRecentDailyTicksChunking:
         security_map_mock.filter.return_value = security_map_filtered
         security_map_filtered.select.return_value = security_map_selected
         security_map_selected.unique.return_value = security_map_unique
-        security_map_unique.__getitem__.return_value.to_list.return_value = ['sid_123']
+
+        # Setup column access mocks for security_map resolution
+        sid_col_mock2 = Mock()
+        sid_col_mock2.to_list.return_value = ['sid_123']
+        permno_col_mock = Mock()
+        permno_col_mock.to_list.return_value = [10516]
+        security_map_unique.__getitem__.side_effect = lambda col: sid_col_mock2 if col == 'security_id' else permno_col_mock
 
         mock_sm_instance.security_map.return_value = security_map_mock
         mock_sm_instance.sid_to_permno.return_value = 10516
@@ -1490,7 +1514,13 @@ class TestRecentDailyTicksChunking:
         filtered_mock.select.return_value = selected_mock
         selected_mock.unique.return_value = unique_mock
         unique_mock.filter.return_value = final_mock
-        final_mock.__getitem__.return_value.to_list.return_value = ['AAPL']
+
+        # Setup column access mocks for master_tb resolution
+        symbol_col_mock = Mock()
+        symbol_col_mock.to_list.return_value = ['AAPL']
+        sid_col_mock = Mock()
+        sid_col_mock.to_list.return_value = ['sid_123']
+        final_mock.__getitem__.side_effect = lambda col: symbol_col_mock if col == 'symbol' else sid_col_mock
 
         mock_sm_instance.master_tb = mock_master_tb
         mock_sm_instance.get_security_id.return_value = 'sid_123'
@@ -1503,7 +1533,13 @@ class TestRecentDailyTicksChunking:
         security_map_mock.filter.return_value = security_map_filtered
         security_map_filtered.select.return_value = security_map_selected
         security_map_selected.unique.return_value = security_map_unique
-        security_map_unique.__getitem__.return_value.to_list.return_value = ['sid_123']
+
+        # Setup column access mocks for security_map resolution
+        sid_col_mock2 = Mock()
+        sid_col_mock2.to_list.return_value = ['sid_123']
+        permno_col_mock = Mock()
+        permno_col_mock.to_list.return_value = [10516]
+        security_map_unique.__getitem__.side_effect = lambda col: sid_col_mock2 if col == 'security_id' else permno_col_mock
 
         mock_sm_instance.security_map.return_value = security_map_mock
         mock_sm_instance.sid_to_permno.return_value = 10516

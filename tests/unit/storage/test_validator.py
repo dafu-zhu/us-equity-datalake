@@ -140,8 +140,10 @@ class TestValidator:
         error_response = {'Error': {'Code': '403', 'Message': 'Forbidden'}}
         mock_s3_client.head_object.side_effect = ClientError(error_response, 'HeadObject')
 
-        validator = Validator(s3_client=mock_s3_client, bucket_name="test-bucket")
-        result = validator.top_3000_exists(2024, 6)
+        # Patch setup_logger to return our mock logger
+        with patch('quantdl.storage.validation.setup_logger', return_value=mock_logger):
+            validator = Validator(s3_client=mock_s3_client, bucket_name="test-bucket")
+            result = validator.top_3000_exists(2024, 6)
 
         assert result is False
         mock_logger.error.assert_called()

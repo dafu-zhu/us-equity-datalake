@@ -334,6 +334,12 @@ class CRSPDailyTicks:
                     continue
                 symbol_to_permno[symbol] = permno
 
+        # Log failed symbols summary if any
+        if failed_symbols:
+            self.logger.warning(f"Failed symbols ({len(failed_symbols)}): {', '.join(failed_symbols[:20])}")
+            if len(failed_symbols) > 20:
+                self.logger.warning(f"... and {len(failed_symbols) - 20} more")
+
         if not symbol_to_permno:
             self.logger.error("No symbols could be resolved to permnos")
             return {}
@@ -528,6 +534,12 @@ class CRSPDailyTicks:
                     self.logger.warning(f"Failed to resolve permno for {symbol} (sid={sid})")
                     continue
                 symbol_to_permno[symbol] = permno
+
+        # Log failed symbols summary if any
+        if failed_symbols:
+            self.logger.warning(f"Failed symbols ({len(failed_symbols)}): {', '.join(failed_symbols[:20])}")
+            if len(failed_symbols) > 20:
+                self.logger.warning(f"... and {len(failed_symbols) - 20} more")
 
         if not symbol_to_permno:
             self.logger.error("No symbols could be resolved to permnos")

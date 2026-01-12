@@ -26,6 +26,7 @@ def _make_app():
     app.calendar = Mock()
     app.cik_resolver = Mock()
     app.sec_rate_limiter = Mock()
+    app.crsp_ticks = Mock()
     return app
 
 
@@ -1852,9 +1853,11 @@ class TestUploadApp:
         app = _make_app()
         app.universe_manager.load_symbols_for_year.return_value = ["AAPL"]
         app.cik_resolver.batch_prefetch_ciks.return_value = {"AAPL": "0000320193"}
-        app.universe_manager.load_universe.return_value = pl.DataFrame({
+        # Mock crsp_ticks security_master to return empty (so "Unknown" is used)
+        app.crsp_ticks.security_master.master_tb.filter.return_value.select.return_value.unique.return_value = pl.DataFrame({
             "symbol": [],  # Empty - AAPL not found
-            "company": []
+            "company": [],
+            "cik": []
         })
 
         future = Mock()
@@ -1882,11 +1885,11 @@ class TestUploadApp:
         """Test large non-SEC filer list (>30) logs first 30 - covers line 944."""
         app = _make_app()
 
-        # Create 40 symbols
-        all_symbols = [f"SYM{i:03d}" for i in range(40)]
+        # Create 41 symbols to ensure >30 non-SEC filers
+        all_symbols = [f"SYM{i:03d}" for i in range(41)]
         app.universe_manager.load_symbols_for_year.return_value = all_symbols
 
-        # Only first 10 have CIKs
+        # Only first 10 have CIKs (so 31 don't have CIKs, triggering >30 threshold)
         cik_map = {f"SYM{i:03d}": f"000{i:04d}" for i in range(10)}
         app.cik_resolver.batch_prefetch_ciks.return_value = cik_map
 
@@ -1928,17 +1931,23 @@ class TestUploadApp:
         app.universe_manager.load_symbols_for_year.return_value = ["AAPL"]
         app.cik_resolver.batch_prefetch_ciks.return_value = {"AAPL": "0000320193"}
         app.validator.data_exists.return_value = True  # Already exists
+        app.data_collectors.sec_collector = Mock()
+        app.data_collectors.sec_collector.collect_fundamental_data.return_value = pl.DataFrame()
+        app.data_publishers.publish_derived_fundamental.return_value = {"status": "success"}
 
-        future = Mock()
-        future.result.return_value = {"status": "success"}
+        # Use side_effect to actually call the method
+        def submit_side_effect(fn, *args, **kwargs):
+            future = Mock()
+            future.result.return_value = fn(*args, **kwargs)
+            return future
 
         executor = Mock()
         executor.__enter__ = Mock(return_value=executor)
         executor.__exit__ = Mock(return_value=False)
-        executor.submit = Mock(return_value=future)
+        executor.submit = Mock(side_effect=submit_side_effect)
 
         with patch('quantdl.storage.app.ThreadPoolExecutor', return_value=executor):
-            with patch('quantdl.storage.app.as_completed', return_value=[future]):
+            with patch('quantdl.storage.app.as_completed', side_effect=lambda futures: futures):
                 app.upload_derived_fundamental("2024-01-01", "2024-12-31", max_workers=1, overwrite=False)
 
         # Check all log levels since log level may have changed
@@ -1949,11 +1958,11 @@ class TestUploadApp:
         """Test derived fundamental with >30 non-SEC filers - covers line 1178."""
         app = _make_app()
 
-        # Create 40 symbols
-        all_symbols = [f"SYM{i:03d}" for i in range(40)]
+        # Create 41 symbols to ensure >30 non-SEC filers
+        all_symbols = [f"SYM{i:03d}" for i in range(41)]
         app.universe_manager.load_symbols_for_year.return_value = all_symbols
 
-        # Only first 10 have CIKs
+        # Only first 10 have CIKs (so 31 don't have CIKs, triggering >30 threshold)
         cik_map = {f"SYM{i:03d}": f"000{i:04d}" for i in range(10)}
         app.cik_resolver.batch_prefetch_ciks.return_value = cik_map
 
