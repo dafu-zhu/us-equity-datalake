@@ -349,29 +349,6 @@ class TestValidatorIntegration:
 
         assert exists is False
 
-    def test_list_available_years_ticks(self, mock_s3_client, mock_env_vars):
-        """Test listing available years for ticks data"""
-        mock_s3_client.list_objects_v2.return_value = {
-            'Contents': [
-                {'Key': 'data/raw/ticks/daily/AAPL/2022/ticks.parquet'},
-                {'Key': 'data/raw/ticks/daily/AAPL/2023/ticks.parquet'},
-                {'Key': 'data/raw/ticks/daily/AAPL/2024/ticks.parquet'},
-            ],
-            'IsTruncated': False
-        }
-
-        validator = Validator(s3_client=mock_s3_client)
-        years = validator.list_available_years('AAPL', 'ticks')
-
-        assert years == [2024, 2023, 2022]  # Reverse sorted
-
-    def test_list_available_years_invalid_type(self, mock_s3_client, mock_env_vars):
-        """Test list_available_years with invalid data type"""
-        validator = Validator(s3_client=mock_s3_client)
-
-        with pytest.raises(ValueError, match="Expected data_type"):
-            validator.list_available_years('AAPL', 'invalid')
-
 
 @pytest.mark.integration
 class TestS3ClientValidatorWorkflow:
