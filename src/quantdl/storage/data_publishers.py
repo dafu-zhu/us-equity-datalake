@@ -145,10 +145,10 @@ class DataPublishers:
         sym: str,
         year: int,
         max_workers: int = 6,
-        year_df: Optional[pl.DataFrame] = None
+        year_df: Optional[pl.DataFrame] = None # type: ignore
     ) -> Dict[str, Optional[str]]:
         if year_df is None:
-            year_df = self.data_collectors.collect_daily_ticks_year(sym, year)
+            year_df: pl.DataFrame = self.data_collectors.collect_daily_ticks_year(sym, year)
         if len(year_df) == 0:
             return {'symbol': sym, 'status': 'skipped', 'error': 'No data available'}
 
@@ -331,6 +331,23 @@ class DataPublishers:
             except queue.Empty:
                 continue
 
+    def get_fundamental_metadata(self, cik: str) -> Optional[Dict[str, str]]:
+        """
+        Get metadata for existing fundamental data from S3.
+
+        :param cik: CIK string
+        :return: Metadata dict or None if file doesn't exist
+        """
+        s3_key = f"data/raw/fundamental/{cik}/fundamental.parquet"
+        try:
+            response = self.s3_client.head_object(
+                Bucket=self.bucket_name,
+                Key=s3_key
+            )
+            return response.get('Metadata', {})
+        except Exception:
+            return None
+
     def publish_fundamental(
         self,
         sym: str,
@@ -346,10 +363,10 @@ class DataPublishers:
         Uses concept-based extraction with approved_mapping.yaml.
         Returns dict with status for progress tracking.
 
-        Storage: data/raw/fundamental/{symbol}/fundamental.parquet
+        Storage: data/raw/fundamental/{cik}/fundamental.parquet
         Stored in long format with [symbol, as_of_date, accn, form, concept, value, start, end, frame, is_instant].
 
-        :param sym: Symbol in Alpaca format (e.g., 'BRK.B') - used for storage path
+        :param sym: Symbol in Alpaca format (e.g., 'BRK.B') - stored in metadata and data
         :param start_date: Start date (YYYY-MM-DD) for filing date filter
         :param end_date: End date (YYYY-MM-DD) for filing date filter
         :param cik: CIK string (or None to skip)
@@ -393,21 +410,29 @@ class DataPublishers:
                 }
 
             concepts_total = len(self.data_collectors._load_concepts(concepts, config_path))
+
+            # Calculate latest filing info for metadata tracking
+            latest_date = combined_df.select(pl.col("as_of_date").max()).item()
+            latest_accn = combined_df.filter(pl.col("as_of_date") == latest_date).select("accn").unique().item()
+
             # Setup S3 message
             buffer = io.BytesIO()
             combined_df.write_parquet(buffer)
             buffer.seek(0)
 
-            s3_key = f"data/raw/fundamental/{sym}/fundamental.parquet"
+            s3_key = f"data/raw/fundamental/{cik}/fundamental.parquet"
             concepts_found = combined_df.select(pl.col("concept").n_unique()).item()
             s3_metadata = {
                 'symbol': sym,
+                'cik': cik,
                 'data_type': 'fundamental',
                 'rows': str(len(combined_df)),
                 'concepts_found': str(concepts_found),
                 'concepts_total': str(concepts_total),
                 'start_date': start_date,
-                'end_date': end_date
+                'end_date': end_date,
+                'latest_filing_date': str(latest_date),
+                'latest_accn': str(latest_accn)
             }
             # Allow list or dict as metadata value
             s3_metadata_prepared = {
@@ -448,7 +473,7 @@ class DataPublishers:
         Computed in-memory from long-format raw data.
 
         Storage:
-        - data/derived/features/fundamental/{symbol}/ttm.parquet (long)
+        - data/derived/features/fundamental/{cik}/ttm.parquet (long)
         """
         try:
             if cik is None:
@@ -487,10 +512,11 @@ class DataPublishers:
             ttm_df.write_parquet(buffer)
             buffer.seek(0)
 
-            s3_key = f"data/derived/features/fundamental/{sym}/ttm.parquet"
+            s3_key = f"data/derived/features/fundamental/{cik}/ttm.parquet"
             concepts_found = ttm_df.select(pl.col("concept").n_unique()).item()
             s3_metadata = {
                 'symbol': sym,
+                'cik': cik,
                 'data_type': 'ttm',
                 'rows': str(len(ttm_df)),
                 'concepts_found': str(concepts_found),
@@ -525,12 +551,13 @@ class DataPublishers:
         sym: str,
         start_date: str,
         end_date: str,
-        derived_df: pl.DataFrame
+        derived_df: pl.DataFrame,
+        cik: Optional[str] = None
     ) -> Dict[str, Optional[str]]:
         """
         Publish derived fundamental data for a single symbol for a date range to S3.
 
-        Storage: data/derived/features/fundamental/{symbol}/metrics.parquet
+        Storage: data/derived/features/fundamental/{cik}/metrics.parquet
         Contains ONLY derived metrics (long format with symbol/as_of_date/metric/value).
 
         :param sym: Symbol in Alpaca format (e.g., 'BRK.B')
@@ -540,7 +567,7 @@ class DataPublishers:
         :return: Dict with status info
         """
         try:
-            # Check if DataFrame is empty
+            # Check if DataFrame is empty or CIK is None
             if len(derived_df) == 0:
                 self.logger.info(f'No derived fundamental data for {sym}')
                 return {
@@ -549,15 +576,24 @@ class DataPublishers:
                     'error': f'Empty derived DataFrame for {sym}'
                 }
 
+            if cik is None:
+                self.logger.warning(f'Skipping {sym}: No CIK found')
+                return {
+                    'symbol': sym,
+                    'status': 'skipped',
+                    'error': f'No CIK found for {sym}'
+                }
+
             # Setup S3 message
             buffer = io.BytesIO()
             derived_df.write_parquet(buffer)
             buffer.seek(0)
 
             s3_data = buffer
-            s3_key = f"data/derived/features/fundamental/{sym}/metrics.parquet"
+            s3_key = f"data/derived/features/fundamental/{cik}/metrics.parquet"
             s3_metadata = {
                 'symbol': sym,
+                'cik': cik,
                 'data_type': 'derived_metrics',
                 'rows': str(len(derived_df)),
                 'columns': str(derived_df.shape[1]),

@@ -411,23 +411,23 @@ class TestGetSymbolsWithRecentFilings:
         """Test identifying symbols with recent EDGAR filings"""
         from quantdl.update.app import DailyUpdateApp
 
-        # Setup CIK resolver mock
+        # Setup CIK resolver mock with batch_prefetch_ciks
         mock_cik_resolver_instance = Mock()
-        mock_cik_resolver_instance.get_cik.side_effect = lambda sym, date: {
+        mock_cik_resolver_instance.batch_prefetch_ciks.return_value = {
             'AAPL': '0000320193',
             'MSFT': '0000789019',
             'GOOGL': None  # No CIK found
-        }.get(sym)
+        }
         mock_cik_resolver.return_value = mock_cik_resolver_instance
 
         app = DailyUpdateApp()
 
-        # Mock get_recent_edgar_filings to return filings for AAPL only
-        with patch.object(app, 'get_recent_edgar_filings') as mock_get_filings:
-            mock_get_filings.side_effect = lambda cik, lookback: (
-                [{'form': '10-Q', 'filingDate': '2024-05-01'}] if cik == '0000320193' else []
-            )
+        # Mock _check_filing to return results based on symbol
+        def mock_check_filing(symbol, cik, lookback, semaphore):
+            has_filing = symbol == 'AAPL'
+            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': has_filing}
 
+        with patch.object(app, '_check_filing', side_effect=mock_check_filing):
             result = app.get_symbols_with_recent_filings(
                 update_date=dt.date(2024, 6, 1),
                 symbols=['AAPL', 'MSFT', 'GOOGL'],
@@ -437,11 +437,13 @@ class TestGetSymbolsWithRecentFilings:
             # Only AAPL should have recent filings
             assert result == {'AAPL'}
 
-            # Verify CIK resolver was called for all symbols
-            assert mock_cik_resolver_instance.get_cik.call_count == 3
+            # Verify batch CIK resolver was called
+            mock_cik_resolver_instance.batch_prefetch_ciks.assert_called_once_with(
+                ['AAPL', 'MSFT', 'GOOGL'], 2024
+            )
 
-            # Verify get_recent_edgar_filings was called for symbols with CIKs
-            assert mock_get_filings.call_count == 2  # AAPL and MSFT only
+            # Verify _check_filing was called for symbols with CIKs (AAPL and MSFT only)
+            assert app._check_filing.call_count == 2
 
     @patch('quantdl.update.app.UniverseManager')
     @patch('quantdl.update.app.SECClient')
@@ -470,13 +472,17 @@ class TestGetSymbolsWithRecentFilings:
         # Setup CIK resolver mock - create 150 symbols with CIKs
         symbols = [f'SYM{i:03d}' for i in range(150)]
         mock_cik_resolver_instance = Mock()
-        mock_cik_resolver_instance.get_cik.side_effect = lambda sym, date: f'000{sym}'
+        cik_map = {sym: f'000{sym}' for sym in symbols}
+        mock_cik_resolver_instance.batch_prefetch_ciks.return_value = cik_map
         mock_cik_resolver.return_value = mock_cik_resolver_instance
 
         app = DailyUpdateApp()
 
-        # Mock get_recent_edgar_filings to return no filings
-        with patch.object(app, 'get_recent_edgar_filings', return_value=[]):
+        # Mock _check_filing to return no filings
+        def mock_check_filing(symbol, cik, lookback, semaphore):
+            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': False}
+
+        with patch.object(app, '_check_filing', side_effect=mock_check_filing):
             result = app.get_symbols_with_recent_filings(
                 update_date=dt.date(2024, 6, 1),
                 symbols=symbols,
@@ -1862,3 +1868,183 @@ class TestMainFunction:
         assert call_args[1]['update_ticks'] is False
         assert call_args[1]['update_fundamentals'] is False
         assert call_args[1]['fundamental_lookback_days'] == 14
+
+
+class TestParallelFilingChecks:
+    """Test parallel filing check functionality"""
+
+    @patch('quantdl.update.app.UniverseManager')
+    @patch('quantdl.update.app.SECClient')
+    @patch('quantdl.update.app.DataPublishers')
+    @patch('quantdl.update.app.DataCollectors')
+    @patch('quantdl.update.app.CIKResolver')
+    @patch('quantdl.update.app.RateLimiter')
+    @patch('quantdl.update.app.CRSPDailyTicks')
+    @patch('quantdl.update.app.Ticks')
+    @patch('quantdl.update.app.TradingCalendar')
+    @patch('quantdl.update.app.setup_logger')
+    @patch('quantdl.update.app.S3Client')
+    @patch('quantdl.update.app.UploadConfig')
+    @patch.dict('os.environ', {
+        'ALPACA_API_KEY': 'test_key',
+        'ALPACA_API_SECRET': 'test_secret'
+    })
+    def test_check_filing_with_recent_filings(
+        self, mock_config, mock_s3, mock_logger, mock_calendar,
+        mock_ticks, mock_crsp, mock_rate_limiter, mock_cik_resolver,
+        mock_collectors, mock_publishers, mock_sec_client, mock_universe
+    ):
+        """Test _check_filing returns True when recent filings exist"""
+        from quantdl.update.app import DailyUpdateApp
+        from threading import Semaphore
+
+        app = DailyUpdateApp(config_path="test_config.yaml")
+        app.get_recent_edgar_filings = Mock(return_value=[
+            {'form': '10-Q', 'filingDate': '2024-06-30'}
+        ])
+
+        semaphore = Semaphore(10)
+        result = app._check_filing("AAPL", "0000320193", 7, semaphore)
+
+        assert result['symbol'] == "AAPL"
+        assert result['cik'] == "0000320193"
+        assert result['has_recent_filing'] is True
+        app.get_recent_edgar_filings.assert_called_once_with("0000320193", 7)
+
+    @patch('quantdl.update.app.UniverseManager')
+    @patch('quantdl.update.app.SECClient')
+    @patch('quantdl.update.app.DataPublishers')
+    @patch('quantdl.update.app.DataCollectors')
+    @patch('quantdl.update.app.CIKResolver')
+    @patch('quantdl.update.app.RateLimiter')
+    @patch('quantdl.update.app.CRSPDailyTicks')
+    @patch('quantdl.update.app.Ticks')
+    @patch('quantdl.update.app.TradingCalendar')
+    @patch('quantdl.update.app.setup_logger')
+    @patch('quantdl.update.app.S3Client')
+    @patch('quantdl.update.app.UploadConfig')
+    @patch.dict('os.environ', {
+        'ALPACA_API_KEY': 'test_key',
+        'ALPACA_API_SECRET': 'test_secret'
+    })
+    def test_check_filing_without_recent_filings(
+        self, mock_config, mock_s3, mock_logger, mock_calendar,
+        mock_ticks, mock_crsp, mock_rate_limiter, mock_cik_resolver,
+        mock_collectors, mock_publishers, mock_sec_client, mock_universe
+    ):
+        """Test _check_filing returns False when no recent filings"""
+        from quantdl.update.app import DailyUpdateApp
+        from threading import Semaphore
+
+        app = DailyUpdateApp(config_path="test_config.yaml")
+        app.get_recent_edgar_filings = Mock(return_value=[])
+
+        semaphore = Semaphore(10)
+        result = app._check_filing("MSFT", "0000789019", 7, semaphore)
+
+        assert result['symbol'] == "MSFT"
+        assert result['cik'] == "0000789019"
+        assert result['has_recent_filing'] is False
+
+    @patch('quantdl.update.app.UniverseManager')
+    @patch('quantdl.update.app.SECClient')
+    @patch('quantdl.update.app.DataPublishers')
+    @patch('quantdl.update.app.DataCollectors')
+    @patch('quantdl.update.app.CIKResolver')
+    @patch('quantdl.update.app.RateLimiter')
+    @patch('quantdl.update.app.CRSPDailyTicks')
+    @patch('quantdl.update.app.Ticks')
+    @patch('quantdl.update.app.TradingCalendar')
+    @patch('quantdl.update.app.setup_logger')
+    @patch('quantdl.update.app.S3Client')
+    @patch('quantdl.update.app.UploadConfig')
+    @patch.dict('os.environ', {
+        'ALPACA_API_KEY': 'test_key',
+        'ALPACA_API_SECRET': 'test_secret'
+    })
+    def test_get_symbols_with_recent_filings_parallel(
+        self, mock_config, mock_s3, mock_logger, mock_calendar,
+        mock_ticks, mock_crsp, mock_rate_limiter, mock_cik_resolver_class,
+        mock_collectors, mock_publishers, mock_sec_client, mock_universe
+    ):
+        """Test get_symbols_with_recent_filings uses parallel execution"""
+        from quantdl.update.app import DailyUpdateApp
+
+        app = DailyUpdateApp(config_path="test_config.yaml")
+
+        # Mock CIK resolver to return CIKs for all symbols
+        mock_cik_resolver_instance = Mock()
+        mock_cik_resolver_instance.batch_prefetch_ciks.return_value = {
+            'AAPL': '0000320193',
+            'MSFT': '0000789019',
+            'GOOGL': '0001652044'
+        }
+        app.cik_resolver = mock_cik_resolver_instance
+
+        # Mock EDGAR filing checks
+        def mock_check_filing(symbol, cik, lookback, semaphore):
+            has_filing = symbol in ['AAPL', 'GOOGL']
+            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': has_filing}
+
+        app._check_filing = Mock(side_effect=mock_check_filing)
+
+        update_date = dt.date(2024, 6, 30)
+        symbols = ['AAPL', 'MSFT', 'GOOGL']
+
+        result = app.get_symbols_with_recent_filings(update_date, symbols, lookback_days=7)
+
+        # Verify batch CIK resolution was used
+        mock_cik_resolver_instance.batch_prefetch_ciks.assert_called_once_with(
+            symbols, 2024
+        )
+
+        # Verify parallel checks were executed
+        assert app._check_filing.call_count == 3
+
+        # Verify result
+        assert result == {'AAPL', 'GOOGL'}
+
+    @patch('quantdl.update.app.UniverseManager')
+    @patch('quantdl.update.app.SECClient')
+    @patch('quantdl.update.app.DataPublishers')
+    @patch('quantdl.update.app.DataCollectors')
+    @patch('quantdl.update.app.CIKResolver')
+    @patch('quantdl.update.app.RateLimiter')
+    @patch('quantdl.update.app.CRSPDailyTicks')
+    @patch('quantdl.update.app.Ticks')
+    @patch('quantdl.update.app.TradingCalendar')
+    @patch('quantdl.update.app.setup_logger')
+    @patch('quantdl.update.app.S3Client')
+    @patch('quantdl.update.app.UploadConfig')
+    @patch.dict('os.environ', {
+        'ALPACA_API_KEY': 'test_key',
+        'ALPACA_API_SECRET': 'test_secret'
+    })
+    def test_get_symbols_with_recent_filings_filters_null_ciks(
+        self, mock_config, mock_s3, mock_logger, mock_calendar,
+        mock_ticks, mock_crsp, mock_rate_limiter, mock_cik_resolver_class,
+        mock_collectors, mock_publishers, mock_sec_client, mock_universe
+    ):
+        """Test get_symbols_with_recent_filings filters out NULL CIKs"""
+        from quantdl.update.app import DailyUpdateApp
+
+        app = DailyUpdateApp(config_path="test_config.yaml")
+
+        # Mock CIK resolver with one NULL CIK
+        mock_cik_resolver_instance = Mock()
+        mock_cik_resolver_instance.batch_prefetch_ciks.return_value = {
+            'AAPL': '0000320193',
+            'MSFT': None,
+            'GOOGL': '0001652044'
+        }
+        app.cik_resolver = mock_cik_resolver_instance
+
+        app._check_filing = Mock(return_value={'symbol': 'AAPL', 'cik': '0000320193', 'has_recent_filing': True})
+
+        update_date = dt.date(2024, 6, 30)
+        symbols = ['AAPL', 'MSFT', 'GOOGL']
+
+        result = app.get_symbols_with_recent_filings(update_date, symbols, lookback_days=7)
+
+        # Verify only 2 symbols checked (MSFT skipped due to NULL CIK)
+        assert app._check_filing.call_count == 2

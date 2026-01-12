@@ -126,17 +126,19 @@ class Validator:
             year: Optional[int]=None,
             month: Optional[int]=None,
             day: Optional[str]=None,
-            data_tier: str = "raw"
+            data_tier: str = "raw",
+            cik: Optional[str] = None
         ) -> bool:
         """
         For both daily and minute data, check if data exists
 
-        :param symbol: Stock to inspect
+        :param symbol: Stock to inspect (used for ticks and as fallback for fundamental)
         :param data_type: "ticks", "fundamental", or "ttm"
         :param year: Daily data only, specify year
         :param month: Daily data only, specify month (1-12) for monthly partitions
         :param day: Minute data only, specify trade day. Format: YYYY-MM-DD
         :param data_tier: "raw" or "derived" (default: "raw")
+        :param cik: CIK string for fundamental data (zero-padded to 10 digits). If provided, uses CIK-based paths for fundamental/ttm/derived data
         """
         if year and day:
             raise ValueError(f'Specify year OR day, not both')
@@ -166,12 +168,14 @@ class Validator:
                     f"(month optional). Got year={year}, month={month}, day={day}"
                 )
         elif data_type == 'fundamental':
+            identifier = cik if cik else symbol
             if data_tier == "derived":
-                s3_key = f'data/derived/features/fundamental/{symbol}/metrics.parquet'
+                s3_key = f'data/derived/features/fundamental/{identifier}/metrics.parquet'
             else:
-                s3_key = f'{base_prefix}/{data_type}/{symbol}/{data_type}.parquet'
+                s3_key = f'{base_prefix}/{data_type}/{identifier}/{data_type}.parquet'
         elif data_type == 'ttm':
-            s3_key = f'data/derived/features/fundamental/{symbol}/ttm.parquet'
+            identifier = cik if cik else symbol
+            s3_key = f'data/derived/features/fundamental/{identifier}/ttm.parquet'
         else:
             raise ValueError(f'Expected data_type is ticks, fundamental, or ttm, get {data_type} instead')
         

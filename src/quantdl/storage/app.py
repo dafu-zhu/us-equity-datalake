@@ -591,7 +591,7 @@ class UploadApp:
         Uses concept-based extraction with approved_mapping.yaml.
         Returns dict with status for progress tracking.
 
-        Storage: data/raw/fundamental/{symbol}/fundamental.parquet
+        Storage: data/raw/fundamental/{cik}/fundamental.parquet
         Stored in long format, no forward fill.
 
         :param sym: Symbol in Alpaca format (e.g., 'BRK.B')
@@ -600,17 +600,17 @@ class UploadApp:
         :param overwrite: If True, skip existence check and overwrite existing data
         :param cik: Pre-fetched CIK (if None, will look up)
         """
-        if not overwrite and self.validator.data_exists(sym, 'fundamental'):
-            self.logger.info(
-                f"Fundamental data for {sym} already exists; "
-                "continuing to refresh requested date range."
-            )
-
         # Use CIKResolver if CIK not provided
         if cik is None:
             reference_year = int(end_date[:4])
             reference_date = f"{reference_year}-06-30"
             cik = self.cik_resolver.get_cik(sym, reference_date, year=reference_year)
+
+        if not overwrite and self.validator.data_exists(sym, 'fundamental', cik=cik):
+            self.logger.info(
+                f"Fundamental data for {sym} already exists; "
+                "continuing to refresh requested date range."
+            )
 
         # Publish fundamental data using concept-based extraction
         return self.data_publishers.publish_fundamental(
@@ -634,7 +634,7 @@ class UploadApp:
         Computes TTM in-memory from long-format fundamentals.
 
         Storage:
-        - data/derived/features/fundamental/{symbol}/ttm.parquet (long)
+        - data/derived/features/fundamental/{cik}/ttm.parquet (long)
 
         :param sym: Symbol in Alpaca format (e.g., 'BRK.B')
         :param start_date: Start date to fetch data for (YYYY-MM-DD)
@@ -642,16 +642,16 @@ class UploadApp:
         :param overwrite: If True, skip existence check and overwrite existing data
         :param cik: Pre-fetched CIK (if None, will look up)
         """
-        if not overwrite and self.validator.data_exists(sym, 'ttm', data_tier='derived'):
-            self.logger.info(
-                f"TTM data for {sym} already exists; "
-                "continuing to refresh requested date range."
-            )
-
         if cik is None:
             reference_year = int(end_date[:4])
             reference_date = f"{reference_year}-06-30"
             cik = self.cik_resolver.get_cik(sym, reference_date, year=reference_year)
+
+        if not overwrite and self.validator.data_exists(sym, 'ttm', data_tier='derived', cik=cik):
+            self.logger.info(
+                f"TTM data for {sym} already exists; "
+                "continuing to refresh requested date range."
+            )
 
         return self.data_publishers.publish_ttm_fundamental(
             sym=sym,
@@ -1045,18 +1045,18 @@ class UploadApp:
         :param overwrite: If True, skip existence check and overwrite existing data
         :param cik: Pre-fetched CIK (if None, will look up)
         """
-        # Validate: Check if derived data already exists
-        if not overwrite and self.validator.data_exists(sym, 'fundamental', data_tier='derived'):
-            self.logger.info(
-                f"Derived metrics for {sym} already exists; "
-                "continuing to refresh requested date range."
-            )
-
         # Use CIKResolver if CIK not provided
         if cik is None:
             reference_year = int(end_date[:4])
             reference_date = f"{reference_year}-06-30"
             cik = self.cik_resolver.get_cik(sym, reference_date, year=reference_year)
+
+        # Validate: Check if derived data already exists
+        if not overwrite and self.validator.data_exists(sym, 'fundamental', data_tier='derived', cik=cik):
+            self.logger.info(
+                f"Derived metrics for {sym} already exists; "
+                "continuing to refresh requested date range."
+            )
 
         if cik is None:
             return {
@@ -1090,7 +1090,8 @@ class UploadApp:
             sym=sym,
             start_date=start_date,
             end_date=end_date,
-            derived_df=derived_df
+            derived_df=derived_df,
+            cik=cik
         )
 
     def upload_derived_fundamental(

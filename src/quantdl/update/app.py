@@ -18,6 +18,8 @@ from collections import defaultdict
 import requests
 import polars as pl
 from dotenv import load_dotenv
+import time
+from threading import Semaphore
 
 from quantdl.utils.logger import setup_logger
 from quantdl.utils.calendar import TradingCalendar
@@ -183,6 +185,28 @@ class DailyUpdateApp:
             self.logger.debug(f"Unexpected error checking EDGAR for CIK {cik}: {e}")
             return []
 
+    def _check_filing(self, symbol: str, cik: str, lookback_days: int, semaphore: Semaphore) -> Dict:
+        """
+        Check if a symbol has recent filings (helper for parallel execution)
+
+        :param symbol: Symbol to check
+        :param cik: CIK for the symbol
+        :param lookback_days: Number of days to look back
+        :param semaphore: Semaphore for rate limiting
+        :return: Dict with symbol and has_recent_filing boolean
+        """
+        with semaphore:
+            time.sleep(0.1)  # Rate limit: 10 req/sec (0.1s between requests)
+            recent_filings = self.get_recent_edgar_filings(cik, lookback_days)
+
+            if recent_filings:
+                self.logger.debug(
+                    f"{symbol} (CIK {cik}): {len(recent_filings)} recent filings - "
+                    f"{[f['form'] for f in recent_filings]}"
+                )
+
+            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': len(recent_filings) > 0}
+
     def get_symbols_with_recent_filings(
         self,
         update_date: dt.date,
@@ -190,7 +214,7 @@ class DailyUpdateApp:
         lookback_days: int = 7
     ) -> Set[str]:
         """
-        Identify symbols that have new EDGAR filings.
+        Identify symbols that have new EDGAR filings (parallelized).
 
         :param update_date: Date to update (typically yesterday)
         :param symbols: List of symbols to check
@@ -201,30 +225,34 @@ class DailyUpdateApp:
 
         self.logger.info(f"Checking EDGAR for recent filings ({lookback_days} day lookback)...")
 
-        # Resolve symbols to CIKs
-        symbol_to_cik = {}
-        for sym in symbols:
-            cik = self.cik_resolver.get_cik(sym, update_date.strftime('%Y-%m-%d'))
-            if cik:
-                symbol_to_cik[sym] = cik
+        # Batch resolve symbols to CIKs
+        year = update_date.year
+        symbol_to_cik = self.cik_resolver.batch_prefetch_ciks(symbols, year)
+
+        # Filter out None CIKs
+        symbol_to_cik = {sym: cik for sym, cik in symbol_to_cik.items() if cik is not None}
 
         self.logger.info(f"Resolved {len(symbol_to_cik)}/{len(symbols)} symbols to CIKs")
 
-        # Check each CIK for recent filings
-        checked = 0
-        for sym, cik in symbol_to_cik.items():
-            recent_filings = self.get_recent_edgar_filings(cik, lookback_days)
+        # Parallel EDGAR checks with rate limiting
+        max_workers = 10
+        semaphore = Semaphore(max_workers)
 
-            if recent_filings:
-                symbols_with_filings.add(sym)
-                self.logger.debug(
-                    f"{sym} (CIK {cik}): {len(recent_filings)} recent filings - "
-                    f"{[f['form'] for f in recent_filings]}"
-                )
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._check_filing, sym, cik, lookback_days, semaphore): sym
+                for sym, cik in symbol_to_cik.items()
+            }
 
-            checked += 1
-            if checked % 100 == 0:
-                self.logger.info(f"Checked {checked}/{len(symbol_to_cik)} symbols for filings")
+            checked = 0
+            for future in as_completed(futures):
+                result = future.result()
+                if result['has_recent_filing']:
+                    symbols_with_filings.add(result['symbol'])
+
+                checked += 1
+                if checked % 100 == 0:
+                    self.logger.info(f"Checked {checked}/{len(symbol_to_cik)} symbols for filings")
 
         self.logger.info(
             f"Found {len(symbols_with_filings)} symbols with recent filings "
@@ -554,7 +582,8 @@ class DailyUpdateApp:
                         sym=sym,
                         start_date=start_date,
                         end_date=end_date,
-                        derived_df=derived_df
+                        derived_df=derived_df,
+                        cik=cik
                     )
 
                 stats['success'] += 1
