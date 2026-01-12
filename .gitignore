@@ -221,6 +221,7 @@ __marimo__/
 # Claude
 .claude/
 .claude_spec/
+tmpclaude-*
 
 # MCP
 .playwright-mcp/
