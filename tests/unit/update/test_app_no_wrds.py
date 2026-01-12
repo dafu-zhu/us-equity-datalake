@@ -242,7 +242,7 @@ class TestDailyUpdateAppNoWRDSGetSymbols:
 
         # Mock Nasdaq response
         mock_df = pd.DataFrame({
-            'Symbol': ['AAPL', 'MSFT', 'GOOGL'],
+            'Ticker': ['AAPL', 'MSFT', 'GOOGL'],
             'Name': ['Apple Inc.', 'Microsoft Corp', 'Alphabet Inc']
         })
         mock_fetch.return_value = mock_df
@@ -268,7 +268,7 @@ class TestDailyUpdateAppNoWRDSGetSymbols:
         from quantdl.update.app_no_wrds import DailyUpdateAppNoWRDS
         import pandas as pd
 
-        mock_df = pd.DataFrame({'Symbol': ['AAPL'], 'Name': ['Apple']})
+        mock_df = pd.DataFrame({'Ticker': ['AAPL'], 'Name': ['Apple']})
         mock_fetch.return_value = mock_df
 
         app = DailyUpdateAppNoWRDS()
