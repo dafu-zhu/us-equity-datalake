@@ -86,7 +86,3 @@ def align_calendar(
     )
 
     return result
-
-if __name__ == "__main__":
-    mp = symbol_cik_mapping()
-    print(mp.keys())

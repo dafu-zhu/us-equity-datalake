@@ -699,7 +699,3 @@ def main() -> None:
         update_fundamentals=not args.no_fundamentals,
         fundamental_lookback_days=args.lookback
     )
-
-
-if __name__ == "__main__":
-    main()
