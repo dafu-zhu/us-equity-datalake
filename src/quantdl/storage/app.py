@@ -608,7 +608,7 @@ class UploadApp:
 
         if not overwrite and self.validator.data_exists(sym, 'fundamental', cik=cik):
             self.logger.info(
-                f"Fundamental data for {sym} already exists; "
+                f"Fundamental data for {cik} already exists; "
                 "continuing to refresh requested date range."
             )
 
