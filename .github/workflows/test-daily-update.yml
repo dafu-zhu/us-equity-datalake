@@ -1,0 +1,81 @@
+name: Test Daily Update
+
+on:
+  workflow_dispatch:  # Manual trigger only
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Debug - Check secrets exist
+        run: |
+          echo "WRDS_USERNAME: ${{ secrets.WRDS_USERNAME != '' && 'SET' || 'MISSING' }}"
+          echo "WRDS_PASSWORD: ${{ secrets.WRDS_PASSWORD != '' && 'SET' || 'MISSING' }}"
+          echo "ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY != '' && 'SET' || 'MISSING' }}"
+          echo "ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET != '' && 'SET' || 'MISSING' }}"
+          echo "AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID != '' && 'SET' || 'MISSING' }}"
+          echo "AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY != '' && 'SET' || 'MISSING' }}"
+          echo "SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT != '' && 'SET' || 'MISSING' }}"
+          echo "MAIL_SERVER: ${{ secrets.MAIL_SERVER != '' && 'SET' || 'MISSING' }}"
+          echo "MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD != '' && 'SET' || 'MISSING' }}"
+
+      - name: Run daily update with --no-ticks (faster test)
+        env:
+          WRDS_USERNAME: ${{ secrets.WRDS_USERNAME }}
+          WRDS_PASSWORD: ${{ secrets.WRDS_PASSWORD }}
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: |
+          uv run quantdl-update --no-ticks 2>&1 | tee update.log
+
+      - name: Read logs
+        id: read-logs
+        if: always()
+        run: |
+          if [ -f update.log ]; then
+            echo "content<<EOF" >> $GITHUB_OUTPUT
+            tail -n 100 update.log >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send test email
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.MAIL_SERVER }}
+          server_port: ${{ secrets.MAIL_PORT }}
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: '[TEST] Daily Update Workflow Test'
+          to: ${{ secrets.MAIL_TO }}
+          from: ${{ secrets.MAIL_FROM }}
+          body: |
+            Test run completed at ${{ github.event.repository.updated_at }}
+
+            Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ============================================
+            LOGS:
+            ============================================
+            ${{ steps.read-logs.outputs.content }}
+          attachments: update.log
