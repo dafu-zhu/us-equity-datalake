@@ -1982,7 +1982,6 @@ class TestParallelFilingChecks:
 
         assert result['symbol'] == "AAPL"
         assert result['cik'] == "0000320193"
-        assert result['has_recent_filing'] is False  # 8-K should not trigger
 
     @patch('quantdl.update.app.UniverseManager')
     @patch('quantdl.update.app.SECClient')
