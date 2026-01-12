@@ -1,5 +1,5 @@
 import datetime as dt
-from quantdl.update.app import DailyUpdateApp
+import os
 
 def main():
     """Main entry point for daily update."""
@@ -27,6 +27,12 @@ def main():
         default=7,
         help='Days to look back for EDGAR filings (default: 7)'
     )
+    parser.add_argument(
+        '--no-wrds',
+        action='store_true',
+        help='Use WRDS-free mode (Nasdaq universe + SEC CIK mapping). '
+             'Suitable for CI/CD environments where WRDS has IP restrictions.'
+    )
 
     args = parser.parse_args()
 
@@ -36,8 +42,26 @@ def main():
     else:
         target_date = None  # Will default to yesterday
 
+    # Auto-detect WRDS-free mode if credentials missing
+    use_wrds_free = args.no_wrds
+    if not use_wrds_free:
+        wrds_user = os.getenv('WRDS_USERNAME')
+        wrds_pass = os.getenv('WRDS_PASSWORD')
+        if not wrds_user or not wrds_pass:
+            print("WRDS credentials not found, using WRDS-free mode")
+            use_wrds_free = True
+
+    # Import appropriate app
+    if use_wrds_free:
+        from quantdl.update.app_no_wrds import DailyUpdateAppNoWRDS
+        print("Running in WRDS-free mode (Nasdaq + SEC API)")
+        app = DailyUpdateAppNoWRDS()
+    else:
+        from quantdl.update.app import DailyUpdateApp
+        print("Running with WRDS connection")
+        app = DailyUpdateApp()
+
     # Run update
-    app = DailyUpdateApp()
     app.run_daily_update(
         target_date=target_date,
         update_ticks=not args.no_ticks,

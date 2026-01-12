@@ -2,6 +2,8 @@
 
 The `daily-update.yml` workflow requires the following secrets to be configured in your GitHub repository.
 
+**Note**: As of January 2026, the workflow runs in **WRDS-free mode** to avoid IP restrictions on GitHub Actions runners. It uses Nasdaq FTP for universe data and SEC's public API for CIK mappings instead of WRDS/CRSP.
+
 ## Setting Up Secrets
 
 1. Go to your repository on GitHub
@@ -10,13 +12,11 @@ The `daily-update.yml` workflow requires the following secrets to be configured 
 
 ## Required Secrets
 
-### Data Source Credentials
+### Data Source Credentials (No WRDS Required)
 
 | Secret Name | Description | Example |
 |------------|-------------|---------|
-| `WRDS_USERNAME` | Your WRDS/Wharton account username | `your_username` |
-| `WRDS_PASSWORD` | Your WRDS/Wharton account password | `your_password` |
-| `ALPACA_API_KEY` | Alpaca Markets API key | `PKXXXXXXXXXXXXX` |
+| `ALPACA_API_KEY` | Alpaca Markets API key for ticks data | `PKXXXXXXXXXXXXX` |
 | `ALPACA_API_SECRET` | Alpaca Markets API secret | `xxxxxxxxxxxxx` |
 | `AWS_ACCESS_KEY_ID` | AWS access key for S3 storage | `AKIAXXXXXXXX` |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret access key | `xxxxxxxxxxxxxxxx` |
@@ -60,26 +60,21 @@ If successful, the main `daily-update.yml` workflow will run daily at 9:00 UTC (
 
 ## How It Works
 
-### WRDS Authentication
-The workflow creates a `.pgpass` file for non-interactive PostgreSQL authentication to WRDS:
-```bash
-echo "wrds-pgdata.wharton.upenn.edu:9737:wrds:$USERNAME:$PASSWORD" > ~/.pgpass
-chmod 600 ~/.pgpass
-```
-This allows the WRDS Python library to authenticate without interactive prompts.
+### WRDS-Free Mode
+The workflow runs with `--no-wrds` flag, which bypasses WRDS entirely:
+- **Universe data**: Fetched from Nasdaq FTP (current stocks only)
+- **CIK mapping**: Uses SEC's public API (`https://www.sec.gov/files/company_tickers.json`)
+- **Ticks data**: Fetched from Alpaca API (unchanged)
+- **Fundamentals**: Fetched from SEC EDGAR API (unchanged)
 
-**Note on 2FA/MFA**: WRDS uses multi-factor authentication tied to IP addresses (30-day session tokens). GitHub Actions runners have dynamic IPs, which may require periodic re-authentication. If workflows fail with authentication errors after 30 days of inactivity, manually trigger the workflow or contact WRDS support for CI/CD-specific authentication options.
+This mode is suitable for GitHub Actions where WRDS has IP-based restrictions that block dynamic runner IPs.
+
+**Limitations of WRDS-free mode**:
+- Uses current universe only (no historical universe from specific past dates)
+- CIK mapping based on current SEC snapshot (may miss delisted/merged companies)
+- Suitable for daily updates of currently-traded stocks
 
 ## Troubleshooting
-
-### Error: "WRDS credentials not found"
-- `WRDS_USERNAME` or `WRDS_PASSWORD` secret is missing or empty
-- Add both secrets in GitHub Settings > Secrets > Actions
-
-### Error: "EOF when reading a line" (WRDS)
-- `.pgpass` file not created or has wrong permissions
-- This is now handled automatically in the workflow
-- Ensure `WRDS_USERNAME` and `WRDS_PASSWORD` secrets are set
 
 ### Error: "Application-specific password required"
 - Using Gmail with 2FA but regular password instead of app password
