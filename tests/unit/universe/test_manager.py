@@ -67,8 +67,8 @@ class TestUniverseManager:
 
         manager = UniverseManager(security_master=mock_sm)
 
-        # Verify CRSP fetcher was created with security master's db
-        mock_crsp_class.assert_called_once_with(conn=mock_sm.db)
+        # Verify CRSP fetcher was created with security master's db and require_wrds=False
+        mock_crsp_class.assert_called_once_with(conn=mock_sm.db, require_wrds=False)
 
         # Verify provided security master was used
         assert manager.security_master == mock_sm

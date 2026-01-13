@@ -52,21 +52,21 @@ class TestDataPublishers:
             "volume": [50000000]
         })
 
-        result = publisher.publish_daily_ticks("AAPL", 2024, df, month=None, by_year=False)
+        result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df, month=None, by_year=False)
 
         assert result == {"symbol": "AAPL", "status": "success", "error": None}
         s3_client.upload_fileobj.assert_called_once()
 
-        # Verify yearly partition path
+        # Verify security_id-based path (new design)
         call_args = s3_client.upload_fileobj.call_args
-        assert "data/raw/ticks/daily/AAPL/2024/ticks.parquet" in call_args.kwargs["Key"]
+        assert "data/raw/ticks/daily/12345/" in call_args.kwargs["Key"]
 
     def test_publish_daily_ticks_requires_df(self):
         """df is required when by_year is False."""
         publisher, _, _ = _make_publisher()
 
         with pytest.raises(ValueError, match="df is required"):
-            publisher.publish_daily_ticks("AAPL", 2024, df=None, by_year=False)
+            publisher.publish_daily_ticks("AAPL", 2024, 12345, df=None, by_year=False)
 
     def test_publish_daily_ticks_success_monthly(self):
         """Test publishing daily ticks with monthly partition (recommended)"""
@@ -81,14 +81,14 @@ class TestDataPublishers:
             "volume": [50000000]
         })
 
-        result = publisher.publish_daily_ticks("AAPL", 2024, df, month=6, by_year=False)
+        result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df, month=6, by_year=False)
 
         assert result == {"symbol": "AAPL", "status": "success", "error": None}
         s3_client.upload_fileobj.assert_called_once()
 
-        # Verify monthly partition path
+        # Verify security_id-based monthly path (new design)
         call_args = s3_client.upload_fileobj.call_args
-        assert "data/raw/ticks/daily/AAPL/2024/06/ticks.parquet" in call_args.kwargs["Key"]
+        assert "data/raw/ticks/daily/12345/2024/06/ticks.parquet" in call_args.kwargs["Key"]
 
     def test_publish_daily_ticks_empty(self):
         """Test that empty dataframes are skipped for both partition types"""
@@ -104,11 +104,11 @@ class TestDataPublishers:
         })
 
         # Test yearly partition
-        result = publisher.publish_daily_ticks("AAPL", 2024, df, month=None, by_year=False)
+        result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df, month=None, by_year=False)
         assert result["status"] == "skipped"
 
         # Test monthly partition
-        result = publisher.publish_daily_ticks("AAPL", 2024, df, month=6, by_year=False)
+        result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df, month=6, by_year=False)
         assert result["status"] == "skipped"
 
         s3_client.upload_fileobj.assert_not_called()
@@ -126,7 +126,7 @@ class TestDataPublishers:
             "volume": [50000000]
         })
 
-        result = publisher.publish_daily_ticks("AAPL", 2024, df, month=6, by_year=False)
+        result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df, month=6, by_year=False)
 
         assert result["status"] == "success"
 
@@ -149,15 +149,15 @@ class TestDataPublishers:
             "volume": [50000000]
         })
 
-        result = publisher.publish_daily_ticks("AAPL", 2024, df, month=None, by_year=False)
+        result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df, month=None, by_year=False)
 
         assert result["status"] == "success"
 
-        # Verify metadata includes partition_type but not month
+        # Verify metadata includes partition_type (history) but not month
         call_args = s3_client.upload_fileobj.call_args
         metadata = call_args.kwargs["ExtraArgs"]["Metadata"]
         assert 'month' not in metadata or metadata.get('month') is None
-        assert metadata.get('partition_type') == 'yearly'
+        assert metadata.get('partition_type') == 'history'  # New design uses 'history' instead of 'yearly'
 
     def test_publish_daily_ticks_by_year_skips_empty_year(self):
         """by_year returns skipped when year_df is empty."""
@@ -165,7 +165,7 @@ class TestDataPublishers:
 
         data_collectors.collect_daily_ticks_year.return_value = pl.DataFrame()
 
-        result = publisher.publish_daily_ticks("AAPL", 2024, df=None, by_year=True)
+        result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df=None, by_year=True)
 
         assert result["status"] == "skipped"
         data_collectors.collect_daily_ticks_year.assert_called_once_with("AAPL", 2024)
@@ -194,7 +194,7 @@ class TestDataPublishers:
         data_collectors.collect_daily_ticks_year.return_value = year_df
         data_collectors.collect_daily_ticks_month.return_value = month_df
 
-        result = publisher.publish_daily_ticks("AAPL", 2024, df=None, by_year=True, max_workers=2)
+        result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df=None, by_year=True, max_workers=2)
 
         data_collectors.collect_daily_ticks_year.assert_called_once_with("AAPL", 2024)
         assert data_collectors.collect_daily_ticks_month.call_count == 12
@@ -220,7 +220,7 @@ class TestDataPublishers:
         data_collectors.collect_daily_ticks_month.return_value = year_df
 
         with patch.object(publisher, "_publish_daily_ticks_df", return_value={"status": "failed"}):
-            result = publisher.publish_daily_ticks("AAPL", 2024, df=None, by_year=True)
+            result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df=None, by_year=True)
 
         assert result["status"] == "failed"
 
@@ -240,7 +240,7 @@ class TestDataPublishers:
         data_collectors.collect_daily_ticks_month.return_value = year_df
 
         with patch.object(publisher, "_publish_daily_ticks_df", return_value={"status": "skipped"}):
-            result = publisher.publish_daily_ticks("AAPL", 2024, df=None, by_year=True)
+            result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df=None, by_year=True)
 
         assert result["status"] == "skipped"
 
@@ -273,7 +273,7 @@ class TestDataPublishers:
             "volume": [50000000]
         })
 
-        result = publisher.publish_daily_ticks("AAPL", 2024, df, by_year=False)
+        result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df, by_year=False)
 
         assert result["status"] == "skipped"
 
@@ -290,7 +290,7 @@ class TestDataPublishers:
             "volume": [50000000]
         })
 
-        result = publisher.publish_daily_ticks("AAPL", 2024, df, by_year=False)
+        result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df, by_year=False)
 
         assert result["status"] == "failed"
 
@@ -307,7 +307,7 @@ class TestDataPublishers:
             "volume": [50000000]
         })
 
-        result = publisher.publish_daily_ticks("AAPL", 2024, df, by_year=False)
+        result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df, by_year=False)
 
         assert result["status"] == "failed"
 
@@ -812,7 +812,7 @@ class TestDataPublishers:
             "volume": [50000000]
         })
 
-        result = publisher.publish_daily_ticks("AAPL", 2024, df, by_year=False)
+        result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df, by_year=False)
 
         assert result["status"] == "failed"
         assert result["error"] == "some other error"

@@ -264,8 +264,10 @@ class TestCRSPDailyTicksEdgeCases:
 
         crsp = CRSPDailyTicks(conn=mock_conn)
 
-        # Verify SecurityMaster was initialized with the connection
-        mock_security_master_class.assert_called_once_with(db=mock_conn)
+        # Verify SecurityMaster was initialized (WRDS-free mode passes db=None initially)
+        mock_security_master_class.assert_called_once_with(
+            db=None, s3_client=None, bucket_name='us-equity-datalake'
+        )
 
     @patch('quantdl.collection.crsp_ticks.validate_date_string')
     @patch('quantdl.collection.crsp_ticks.validate_permno')
