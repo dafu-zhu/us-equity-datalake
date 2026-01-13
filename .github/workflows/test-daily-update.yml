@@ -42,7 +42,17 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: |
-          uv run quantdl-update --no-ticks --no-wrds 2>&1 | tee update.log
+          uv run quantdl-update --no-ticks 2>&1 | tee update.log
+
+      - name: Test consolidate_year functionality
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          # Run unit tests for consolidate_year
+          uv run pytest tests/unit/update/test_app.py::TestConsolidateYear -v 2>&1 | tee consolidate_test.log
 
       - name: Read logs
         id: read-logs
@@ -50,7 +60,15 @@ jobs:
         run: |
           if [ -f update.log ]; then
             echo "content<<EOF" >> $GITHUB_OUTPUT
-            tail -n 100 update.log >> $GITHUB_OUTPUT
+            echo "=== DAILY UPDATE LOG ===" >> $GITHUB_OUTPUT
+            tail -n 50 update.log >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
+            echo "=== CONSOLIDATE YEAR TEST LOG ===" >> $GITHUB_OUTPUT
+            if [ -f consolidate_test.log ]; then
+              tail -n 50 consolidate_test.log >> $GITHUB_OUTPUT
+            else
+              echo "(No consolidate test log found)" >> $GITHUB_OUTPUT
+            fi
             echo "EOF" >> $GITHUB_OUTPUT
           fi
 
@@ -74,4 +92,6 @@ jobs:
             LOGS:
             ============================================
             ${{ steps.read-logs.outputs.content }}
-          attachments: update.log
+          attachments: |
+            update.log
+            consolidate_test.log

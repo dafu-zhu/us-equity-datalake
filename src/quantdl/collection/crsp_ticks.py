@@ -22,36 +22,92 @@ load_dotenv()
 
 
 class CRSPDailyTicks:
-    def __init__(self, conn: Optional[wrds.Connection]=None):
-        """Initialize WRDS connection and load master calendar"""
-        if conn is None:
-            username = os.getenv('WRDS_USERNAME')
-            password = os.getenv('WRDS_PASSWORD')
+    def __init__(
+        self,
+        conn: Optional[wrds.Connection] = None,
+        s3_client = None,
+        bucket_name: str = 'us-equity-datalake',
+        require_wrds: bool = True
+    ):
+        """
+        Initialize WRDS connection and load master calendar.
 
-            if not username or not password:
-                raise ValueError(
-                    "WRDS credentials not found. Set WRDS_USERNAME and WRDS_PASSWORD environment variables."
-                )
-
-            self.conn = wrds.Connection(
-                wrds_username=username,
-                wrds_password=password
-            )
-        else:
-            self.conn = conn
-
-        # Setup calendar directory
-        self.calendar_dir = Path("data/calendar")
-        self.calendar_path = self.calendar_dir / "master.parquet"
-
-        self.security_master = SecurityMaster(db=self.conn)
-
-        # Setup logger
+        :param conn: Optional WRDS connection
+        :param s3_client: Optional S3 client for SecurityMaster lazy loading
+        :param bucket_name: S3 bucket name for SecurityMaster
+        :param require_wrds: If False, allows initialization without WRDS.
+                             WRDS methods will raise clear errors if called.
+        """
+        # Setup logger first
         self.logger = setup_logger(
             name="collection.crsp_ticks",
             log_dir="data/logs/ticks",
             level=logging.INFO
         )
+
+        # Setup calendar directory
+        self.calendar_dir = Path("data/calendar")
+        self.calendar_path = self.calendar_dir / "master.parquet"
+
+        # Track WRDS connection state
+        self._conn = None
+        self._wrds_attempted = False
+        self._wrds_error = None
+
+        # Create SecurityMaster FIRST (can load from S3 without WRDS)
+        self.security_master = SecurityMaster(
+            db=None,  # Don't pass db yet
+            s3_client=s3_client,
+            bucket_name=bucket_name
+        )
+
+        # Try WRDS connection if required
+        if require_wrds:
+            if conn is None:
+                self._conn = self._create_wrds_connection()
+            else:
+                self._conn = conn
+
+            # If SecurityMaster built from WRDS, it already has connection
+            # If loaded from S3, give it our connection for potential future use
+            if self.security_master._from_s3 and self._conn:
+                self.security_master.db = self._conn
+        else:
+            # WRDS-optional mode: Will create lazily if needed
+            self._conn = conn  # Use if provided, else None
+
+    def _create_wrds_connection(self) -> Optional[wrds.Connection]:
+        """Create WRDS connection, return None if credentials unavailable."""
+        try:
+            username = os.getenv('WRDS_USERNAME')
+            password = os.getenv('WRDS_PASSWORD')
+            if not username or not password:
+                raise ValueError("WRDS credentials not found in environment")
+            return wrds.Connection(wrds_username=username, wrds_password=password)
+        except Exception as e:
+            self._wrds_error = str(e)
+            self.logger.warning(f"WRDS connection failed: {e}")
+            return None
+
+    @property
+    def conn(self):
+        """Lazy WRDS connection with clear error on unavailability."""
+        if self._conn is not None:
+            return self._conn
+
+        if not self._wrds_attempted:
+            self._wrds_attempted = True
+            self._conn = self._create_wrds_connection()
+
+        if self._conn is None:
+            raise RuntimeError(
+                "WRDS connection required but unavailable. "
+                f"Error: {self._wrds_error or 'Credentials not found'}. "
+                "This operation requires CRSP data (years < 2025). "
+                "For 2025+ operations, use Alpaca data sources instead."
+            )
+
+        return self._conn
 
     def get_daily(self, symbol: str, day: str, adjusted: bool=True, auto_resolve: bool=True) -> Dict[str, Any]:
         """
@@ -689,4 +745,5 @@ class CRSPDailyTicks:
 
     def close(self):
         """Close WRDS connection"""
-        self.conn.close()
+        if self._conn is not None:
+            self._conn.close()

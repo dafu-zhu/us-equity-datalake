@@ -108,6 +108,7 @@ class DataPublishers:
         self,
         sym: str,
         year: int,
+        security_id: int,
         df: Optional[pl.DataFrame],
         month: Optional[int] = None,
         by_year: bool = False,
@@ -118,14 +119,15 @@ class DataPublishers:
         Publish daily ticks for a single symbol to S3.
 
         Supports both monthly and yearly partitioning:
-        - If month is provided: data/raw/ticks/daily/{symbol}/{YYYY}/{MM}/ticks.parquet
-        - If month is None: data/raw/ticks/daily/{symbol}/{YYYY}/ticks.parquet (legacy)
+        - Monthly: data/raw/ticks/daily/{security_id}/{YYYY}/{MM}/ticks.parquet
+        - Yearly: data/raw/ticks/daily/{security_id}/{YYYY}/ticks.parquet
 
-        Monthly partitioning is recommended for daily updates (92% cost savings).
-        Yearly partitioning can be used for historical bulk uploads.
+        Current year uses monthly partitions (optimizes updates).
+        Completed years use yearly partitions (optimizes queries).
 
         :param sym: Symbol in Alpaca format (e.g., 'BRK.B')
         :param year: Year to fetch data for
+        :param security_id: Security ID from SecurityMaster
         :param df: Polars DataFrame with daily ticks data
         :param month: Optional month (1-12) for monthly partitioning
         :param by_year: If True, collect year data once and publish monthly partitions in parallel
@@ -133,17 +135,18 @@ class DataPublishers:
         :return: Dict with status info
         """
         if by_year:
-            return self._publish_daily_ticks_by_year(sym, year, max_workers=max_workers, year_df=year_df)
+            return self._publish_daily_ticks_by_year(sym, year, security_id, max_workers=max_workers, year_df=year_df)
 
         if df is None:
             raise ValueError("df is required when by_year=False")
 
-        return self._publish_daily_ticks_df(sym, year, df, month=month)
+        return self._publish_daily_ticks_df(sym, year, df, security_id, month=month)
 
     def _publish_daily_ticks_by_year(
         self,
         sym: str,
         year: int,
+        security_id: int,
         max_workers: int = 6,
         year_df: Optional[pl.DataFrame] = None # type: ignore
     ) -> Dict[str, Optional[str]]:
@@ -167,6 +170,7 @@ class DataPublishers:
                     sym,
                     year,
                     month_df,
+                    security_id,
                     month
                 )] = month
 
@@ -192,6 +196,7 @@ class DataPublishers:
         sym: str,
         year: int,
         df: pl.DataFrame,
+        security_id: int,
         month: Optional[int] = None
     ) -> Dict[str, Optional[str]]:
         try:
@@ -208,10 +213,11 @@ class DataPublishers:
 
             # Choose storage path based on partitioning
             if month is not None:
-                # Monthly partition (recommended for daily updates)
-                s3_key = f"data/raw/ticks/daily/{sym}/{year}/{month:02d}/ticks.parquet"
+                # Monthly partition (for current year daily updates)
+                s3_key = f"data/raw/ticks/daily/{security_id}/{year}/{month:02d}/ticks.parquet"
                 s3_metadata = {
-                    'symbol': sym,
+                    'security_id': str(security_id),
+                    'symbols': [sym],
                     'year': str(year),
                     'month': f"{month:02d}",
                     'data_type': 'daily_ticks',
@@ -220,15 +226,16 @@ class DataPublishers:
                     'partition_type': 'monthly'
                 }
             else:
-                # Yearly partition (legacy, for historical bulk uploads)
-                s3_key = f"data/raw/ticks/daily/{sym}/{year}/ticks.parquet"
+                # History file (all completed years consolidated)
+                s3_key = f"data/raw/ticks/daily/{security_id}/history.parquet"
                 s3_metadata = {
-                    'symbol': sym,
+                    'security_id': str(security_id),
+                    'symbols': [sym],
                     'year': str(year),
                     'data_type': 'daily_ticks',
                     'source': 'crsp' if year < self.alpaca_start_year else 'alpaca',
                     'trading_days': str(len(df)),
-                    'partition_type': 'yearly'
+                    'partition_type': 'history'
                 }
 
             # Allow list or dict as metadata value

@@ -28,14 +28,29 @@ class UniverseManager:
         self.alpaca_fetcher = Ticks()
         if crsp_fetcher is None:
             if security_master is None:
-                self.crsp_fetcher = CRSPDailyTicks()
+                # Create new CRSP fetcher with WRDS
+                self.crsp_fetcher = CRSPDailyTicks(require_wrds=True)
                 self.security_master = self.crsp_fetcher.security_master
                 self._owns_wrds_conn = True
             else:
-                self.crsp_fetcher = CRSPDailyTicks(conn=security_master.db)
+                # Use provided SecurityMaster
+                # Only create CRSPDailyTicks if SecurityMaster has WRDS connection
+                if hasattr(security_master, 'db') and security_master.db is not None:
+                    self.crsp_fetcher = CRSPDailyTicks(
+                        conn=security_master.db,
+                        require_wrds=False
+                    )
+                else:
+                    # S3-only SecurityMaster: No CRSP fetcher available
+                    self.crsp_fetcher = None
+                    self.logger.info(
+                        "UniverseManager initialized without CRSP fetcher (S3-only mode). "
+                        "Historical universe queries (<2025) will fail."
+                    )
                 self.security_master = security_master
                 self._owns_wrds_conn = False
         else:
+            # Use provided CRSP fetcher
             self.crsp_fetcher = crsp_fetcher
             self.security_master = security_master or crsp_fetcher.security_master
             self._owns_wrds_conn = False
@@ -100,6 +115,13 @@ class UniverseManager:
                     return symbols
 
                 # For historical years (< 2025), use CRSP historical universe
+                # NEW: Check WRDS availability for historical years
+                if self.crsp_fetcher is None or self.crsp_fetcher._conn is None:
+                    raise RuntimeError(
+                        f"Cannot load symbols for year {year}: WRDS connection required for historical universe. "
+                        "CRSP data frozen at 2024-12-31. For year >= 2025, use current symbols."
+                    )
+
                 # Reuse CRSP database connection for performance
                 db = self.crsp_fetcher.conn if hasattr(self.crsp_fetcher, 'conn') else None
 
@@ -224,7 +246,7 @@ class UniverseManager:
 
     def close(self) -> None:
         """Close WRDS connection if this manager owns it."""
-        if self._owns_wrds_conn and hasattr(self, "crsp_fetcher"):
+        if self._owns_wrds_conn and hasattr(self, "crsp_fetcher") and self.crsp_fetcher is not None:
             if hasattr(self.crsp_fetcher, "conn") and self.crsp_fetcher.conn is not None:
                 self.crsp_fetcher.conn.close()
                 self.logger.info("WRDS connection closed (UniverseManager)")

@@ -27,3 +27,14 @@ transfer:
   max_io_queue: 100
   io_chunksize: 262144
   use_threads: True
+
+daily_ticks:
+  current_year_strategy: monthly  # Use monthly partitions for current year
+  completed_year_strategy: yearly  # Use yearly partitions for completed years
+  year_consolidation_enabled: true  # Auto-consolidate on Jan 1
+
+master:
+  s3_key: data/master/security_master.parquet
+  auto_export: true  # Auto-export after WRDS rebuild
+  force_rebuild: false  # Force WRDS rebuild (skip S3)
+  staleness_threshold_days: 30  # Max age before rebuild

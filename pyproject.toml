@@ -22,6 +22,7 @@ dependencies = [
 [project.scripts]
 quantdl-storage = "quantdl.storage.cli:main"
 quantdl-update = "quantdl.update.cli:main"
+quantdl-export-security-master = "quantdl.master.cli:main"
 
 [tool.uv]
 package = true

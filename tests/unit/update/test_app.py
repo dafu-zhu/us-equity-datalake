@@ -2125,3 +2125,497 @@ class TestParallelFilingChecks:
 
         # Verify only 2 symbols checked (MSFT skipped due to NULL CIK)
         assert app._check_filing.call_count == 2
+
+
+class TestConsolidateYear:
+    """Test consolidate_year method"""
+
+    @patch('quantdl.update.app.ThreadPoolExecutor')
+    @patch('quantdl.update.app.UniverseManager')
+    @patch('quantdl.update.app.SECClient')
+    @patch('quantdl.update.app.DataPublishers')
+    @patch('quantdl.update.app.DataCollectors')
+    @patch('quantdl.update.app.CIKResolver')
+    @patch('quantdl.update.app.RateLimiter')
+    @patch('quantdl.update.app.CRSPDailyTicks')
+    @patch('quantdl.update.app.Ticks')
+    @patch('quantdl.update.app.TradingCalendar')
+    @patch('quantdl.update.app.setup_logger')
+    @patch('quantdl.update.app.S3Client')
+    @patch('quantdl.update.app.UploadConfig')
+    @patch.dict('os.environ', {
+        'ALPACA_API_KEY': 'test_key',
+        'ALPACA_API_SECRET': 'test_secret'
+    })
+    def test_consolidate_year_success(
+        self, mock_config, mock_s3, mock_logger, mock_calendar,
+        mock_ticks, mock_crsp, mock_rate_limiter, mock_cik_resolver,
+        mock_collectors, mock_publishers, mock_sec_client, mock_universe,
+        mock_executor
+    ):
+        """Test consolidate_year successfully consolidates monthly files"""
+        from quantdl.update.app import DailyUpdateApp
+
+        # Setup S3 client mock
+        mock_s3_client = Mock()
+        mock_s3.return_value.client = mock_s3_client
+
+        # Setup CRSP ticks with security master
+        mock_crsp_instance = Mock()
+        mock_security_master = Mock()
+        mock_security_master.get_security_id.return_value = 12345
+        mock_crsp_instance.security_master = mock_security_master
+        mock_crsp.return_value = mock_crsp_instance
+
+        # Setup publishers mock
+        mock_publishers_instance = Mock()
+        mock_publishers_instance.bucket_name = 'test-bucket'
+        mock_publishers_instance.upload_fileobj = Mock()
+        mock_publishers.return_value = mock_publishers_instance
+
+        # Mock monthly data for months 1-3
+        monthly_data = {}
+        for month in range(1, 4):
+            df = pl.DataFrame({
+                'timestamp': [f'2024-{month:02d}-01', f'2024-{month:02d}-15'],
+                'open': [100.0 + month, 101.0 + month],
+                'high': [102.0 + month, 103.0 + month],
+                'low': [99.0 + month, 100.0 + month],
+                'close': [101.0 + month, 102.0 + month],
+                'volume': [1000000, 1100000]
+            })
+            buffer = io.BytesIO()
+            df.write_parquet(buffer)
+            buffer.seek(0)
+            monthly_data[month] = buffer
+
+        # Mock existing history file
+        history_df = pl.DataFrame({
+            'timestamp': ['2023-12-01', '2023-12-15'],
+            'open': [95.0, 96.0],
+            'high': [97.0, 98.0],
+            'low': [94.0, 95.0],
+            'close': [96.0, 97.0],
+            'volume': [900000, 950000]
+        })
+        history_buffer = io.BytesIO()
+        history_df.write_parquet(history_buffer)
+        history_buffer.seek(0)
+
+        # Mock S3 responses
+        def mock_get_object(Bucket, Key):
+            if 'history.parquet' in Key:
+                return {'Body': history_buffer}
+            for month in range(1, 4):
+                if f'2024/{month:02d}/ticks.parquet' in Key:
+                    return {'Body': monthly_data[month]}
+            # No file for months 4-12
+            raise mock_s3_client.exceptions.NoSuchKey()
+
+        mock_s3_client.get_object = Mock(side_effect=mock_get_object)
+        mock_s3_client.delete_object = Mock()
+        no_such_key_exception = type('NoSuchKey', (Exception,), {})
+        mock_s3_client.exceptions = type('Exceptions', (), {'NoSuchKey': no_such_key_exception})()
+
+        # Setup executor mock to run tasks immediately
+        def immediate_executor(max_workers):
+            executor = Mock()
+            def submit(fn, *args, **kwargs):
+                future = Mock()
+                future.result.return_value = fn(*args, **kwargs)
+                return future
+            executor.submit = submit
+            executor.__enter__ = Mock(return_value=executor)
+            executor.__exit__ = Mock(return_value=False)
+            return executor
+
+        mock_executor.side_effect = immediate_executor
+
+        app = DailyUpdateApp()
+
+        # Call consolidate_year
+        result = app.consolidate_year(year=2024, symbols=['AAPL'], max_workers=1)
+
+        # Verify stats
+        assert result['success'] == 1
+        assert result['failed'] == 0
+        assert result['skipped'] == 0
+
+        # Verify history file was uploaded
+        mock_publishers_instance.upload_fileobj.assert_called_once()
+        upload_call = mock_publishers_instance.upload_fileobj.call_args
+        assert 'history.parquet' in upload_call[0][1]
+
+        # Verify monthly files deletion attempted for all 12 months
+        assert mock_s3_client.delete_object.call_count == 12
+
+    @patch('quantdl.update.app.ThreadPoolExecutor')
+    @patch('quantdl.update.app.UniverseManager')
+    @patch('quantdl.update.app.SECClient')
+    @patch('quantdl.update.app.DataPublishers')
+    @patch('quantdl.update.app.DataCollectors')
+    @patch('quantdl.update.app.CIKResolver')
+    @patch('quantdl.update.app.RateLimiter')
+    @patch('quantdl.update.app.CRSPDailyTicks')
+    @patch('quantdl.update.app.Ticks')
+    @patch('quantdl.update.app.TradingCalendar')
+    @patch('quantdl.update.app.setup_logger')
+    @patch('quantdl.update.app.S3Client')
+    @patch('quantdl.update.app.UploadConfig')
+    @patch.dict('os.environ', {
+        'ALPACA_API_KEY': 'test_key',
+        'ALPACA_API_SECRET': 'test_secret'
+    })
+    def test_consolidate_year_no_monthly_files(
+        self, mock_config, mock_s3, mock_logger, mock_calendar,
+        mock_ticks, mock_crsp, mock_rate_limiter, mock_cik_resolver,
+        mock_collectors, mock_publishers, mock_sec_client, mock_universe,
+        mock_executor
+    ):
+        """Test consolidate_year when no monthly files exist"""
+        from quantdl.update.app import DailyUpdateApp
+
+        # Setup S3 client mock
+        mock_s3_client = Mock()
+        mock_s3.return_value.client = mock_s3_client
+
+        # Setup CRSP ticks
+        mock_crsp_instance = Mock()
+        mock_security_master = Mock()
+        mock_security_master.get_security_id.return_value = 12345
+        mock_crsp_instance.security_master = mock_security_master
+        mock_crsp.return_value = mock_crsp_instance
+
+        # Setup publishers mock
+        mock_publishers_instance = Mock()
+        mock_publishers_instance.bucket_name = 'test-bucket'
+        mock_publishers.return_value = mock_publishers_instance
+
+        # Mock S3 - no files exist
+        no_such_key_exception = type('NoSuchKey', (Exception,), {})
+        mock_s3_client.exceptions = type('Exceptions', (), {'NoSuchKey': no_such_key_exception})()
+        mock_s3_client.get_object = Mock(side_effect=no_such_key_exception())
+
+        # Setup executor mock
+        def immediate_executor(max_workers):
+            executor = Mock()
+            def submit(fn, *args, **kwargs):
+                future = Mock()
+                future.result.return_value = fn(*args, **kwargs)
+                return future
+            executor.submit = submit
+            executor.__enter__ = Mock(return_value=executor)
+            executor.__exit__ = Mock(return_value=False)
+            return executor
+
+        mock_executor.side_effect = immediate_executor
+
+        app = DailyUpdateApp()
+
+        # Call consolidate_year
+        result = app.consolidate_year(year=2024, symbols=['AAPL'], max_workers=1)
+
+        # Verify stats - should be skipped
+        assert result['success'] == 0
+        assert result['failed'] == 0
+        assert result['skipped'] == 1
+
+    @patch('quantdl.update.app.ThreadPoolExecutor')
+    @patch('quantdl.update.app.UniverseManager')
+    @patch('quantdl.update.app.SECClient')
+    @patch('quantdl.update.app.DataPublishers')
+    @patch('quantdl.update.app.DataCollectors')
+    @patch('quantdl.update.app.CIKResolver')
+    @patch('quantdl.update.app.RateLimiter')
+    @patch('quantdl.update.app.CRSPDailyTicks')
+    @patch('quantdl.update.app.Ticks')
+    @patch('quantdl.update.app.TradingCalendar')
+    @patch('quantdl.update.app.setup_logger')
+    @patch('quantdl.update.app.S3Client')
+    @patch('quantdl.update.app.UploadConfig')
+    @patch.dict('os.environ', {
+        'ALPACA_API_KEY': 'test_key',
+        'ALPACA_API_SECRET': 'test_secret'
+    })
+    def test_consolidate_year_no_history_file(
+        self, mock_config, mock_s3, mock_logger, mock_calendar,
+        mock_ticks, mock_crsp, mock_rate_limiter, mock_cik_resolver,
+        mock_collectors, mock_publishers, mock_sec_client, mock_universe,
+        mock_executor
+    ):
+        """Test consolidate_year when history file doesn't exist yet"""
+        from quantdl.update.app import DailyUpdateApp
+
+        # Setup S3 client mock
+        mock_s3_client = Mock()
+        mock_s3.return_value.client = mock_s3_client
+
+        # Setup CRSP ticks
+        mock_crsp_instance = Mock()
+        mock_security_master = Mock()
+        mock_security_master.get_security_id.return_value = 12345
+        mock_crsp_instance.security_master = mock_security_master
+        mock_crsp.return_value = mock_crsp_instance
+
+        # Setup publishers mock
+        mock_publishers_instance = Mock()
+        mock_publishers_instance.bucket_name = 'test-bucket'
+        mock_publishers_instance.upload_fileobj = Mock()
+        mock_publishers.return_value = mock_publishers_instance
+
+        # Create monthly data for month 1
+        df = pl.DataFrame({
+            'timestamp': ['2024-01-01', '2024-01-15'],
+            'open': [100.0, 101.0],
+            'high': [102.0, 103.0],
+            'low': [99.0, 100.0],
+            'close': [101.0, 102.0],
+            'volume': [1000000, 1100000]
+        })
+        buffer = io.BytesIO()
+        df.write_parquet(buffer)
+        buffer.seek(0)
+
+        # Mock S3 responses - monthly file exists, history doesn't
+        no_such_key_exception = type('NoSuchKey', (Exception,), {})
+        mock_s3_client.exceptions = type('Exceptions', (), {'NoSuchKey': no_such_key_exception})()
+
+        def mock_get_object(Bucket, Key):
+            if 'history.parquet' in Key:
+                raise mock_s3_client.exceptions.NoSuchKey()
+            if '2024/01/ticks.parquet' in Key:
+                return {'Body': buffer}
+            raise mock_s3_client.exceptions.NoSuchKey()
+
+        mock_s3_client.get_object = Mock(side_effect=mock_get_object)
+        mock_s3_client.delete_object = Mock()
+
+        # Setup executor mock
+        def immediate_executor(max_workers):
+            executor = Mock()
+            def submit(fn, *args, **kwargs):
+                future = Mock()
+                future.result.return_value = fn(*args, **kwargs)
+                return future
+            executor.submit = submit
+            executor.__enter__ = Mock(return_value=executor)
+            executor.__exit__ = Mock(return_value=False)
+            return executor
+
+        mock_executor.side_effect = immediate_executor
+
+        app = DailyUpdateApp()
+
+        # Call consolidate_year
+        result = app.consolidate_year(year=2024, symbols=['AAPL'], max_workers=1)
+
+        # Verify stats
+        assert result['success'] == 1
+        assert result['failed'] == 0
+        assert result['skipped'] == 0
+
+        # Verify history file was uploaded (uses year data only, no prior history)
+        mock_publishers_instance.upload_fileobj.assert_called_once()
+
+    @patch('quantdl.update.app.ThreadPoolExecutor')
+    @patch('quantdl.update.app.UniverseManager')
+    @patch('quantdl.update.app.SECClient')
+    @patch('quantdl.update.app.DataPublishers')
+    @patch('quantdl.update.app.DataCollectors')
+    @patch('quantdl.update.app.CIKResolver')
+    @patch('quantdl.update.app.RateLimiter')
+    @patch('quantdl.update.app.CRSPDailyTicks')
+    @patch('quantdl.update.app.Ticks')
+    @patch('quantdl.update.app.TradingCalendar')
+    @patch('quantdl.update.app.setup_logger')
+    @patch('quantdl.update.app.S3Client')
+    @patch('quantdl.update.app.UploadConfig')
+    @patch.dict('os.environ', {
+        'ALPACA_API_KEY': 'test_key',
+        'ALPACA_API_SECRET': 'test_secret'
+    })
+    def test_consolidate_year_handles_error(
+        self, mock_config, mock_s3, mock_logger, mock_calendar,
+        mock_ticks, mock_crsp, mock_rate_limiter, mock_cik_resolver,
+        mock_collectors, mock_publishers, mock_sec_client, mock_universe,
+        mock_executor
+    ):
+        """Test consolidate_year handles errors gracefully"""
+        from quantdl.update.app import DailyUpdateApp
+
+        # Setup S3 client mock
+        mock_s3_client = Mock()
+        mock_s3.return_value.client = mock_s3_client
+
+        # Setup CRSP ticks - raise exception on get_security_id
+        mock_crsp_instance = Mock()
+        mock_security_master = Mock()
+        mock_security_master.get_security_id.side_effect = Exception("Security ID lookup failed")
+        mock_crsp_instance.security_master = mock_security_master
+        mock_crsp.return_value = mock_crsp_instance
+
+        # Setup publishers mock
+        mock_publishers_instance = Mock()
+        mock_publishers_instance.bucket_name = 'test-bucket'
+        mock_publishers.return_value = mock_publishers_instance
+
+        # Setup executor mock
+        def immediate_executor(max_workers):
+            executor = Mock()
+            def submit(fn, *args, **kwargs):
+                future = Mock()
+                future.result.return_value = fn(*args, **kwargs)
+                return future
+            executor.submit = submit
+            executor.__enter__ = Mock(return_value=executor)
+            executor.__exit__ = Mock(return_value=False)
+            return executor
+
+        mock_executor.side_effect = immediate_executor
+
+        app = DailyUpdateApp()
+
+        # Call consolidate_year
+        result = app.consolidate_year(year=2024, symbols=['AAPL'], max_workers=1)
+
+        # Verify stats - should be failed
+        assert result['success'] == 0
+        assert result['failed'] == 1
+        assert result['skipped'] == 0
+
+
+class TestWRDSFreeInitialization:
+    """Test WRDS-free initialization logic"""
+
+    @patch('quantdl.update.app.UniverseManager')
+    @patch('quantdl.update.app.SECClient')
+    @patch('quantdl.update.app.DataPublishers')
+    @patch('quantdl.update.app.DataCollectors')
+    @patch('quantdl.update.app.CIKResolver')
+    @patch('quantdl.update.app.RateLimiter')
+    @patch('quantdl.update.app.CRSPDailyTicks')
+    @patch('quantdl.update.app.SecurityMaster')
+    @patch('quantdl.update.app.Ticks')
+    @patch('quantdl.update.app.TradingCalendar')
+    @patch('quantdl.update.app.setup_logger')
+    @patch('quantdl.update.app.S3Client')
+    @patch('quantdl.update.app.UploadConfig')
+    @patch.dict('os.environ', {
+        'ALPACA_API_KEY': 'test_key',
+        'ALPACA_API_SECRET': 'test_secret'
+    })
+    def test_init_wrds_available(
+        self, mock_config, mock_s3, mock_logger, mock_calendar,
+        mock_ticks, mock_security_master_class, mock_crsp,
+        mock_rate_limiter, mock_cik_resolver, mock_collectors,
+        mock_publishers, mock_sec_client, mock_universe
+    ):
+        """Test initialization when WRDS is available"""
+        from quantdl.update.app import DailyUpdateApp
+
+        # Setup CRSP ticks with WRDS connection
+        mock_crsp_instance = Mock()
+        mock_crsp_instance._conn = Mock()  # WRDS connection exists
+        mock_security_master = Mock()
+        mock_crsp_instance.security_master = mock_security_master
+        mock_crsp.return_value = mock_crsp_instance
+
+        app = DailyUpdateApp()
+
+        # Verify WRDS is available
+        assert app._wrds_available is True
+        assert app.crsp_ticks == mock_crsp_instance
+        assert app.security_master == mock_security_master
+
+    @patch('quantdl.update.app.UniverseManager')
+    @patch('quantdl.update.app.SECClient')
+    @patch('quantdl.update.app.DataPublishers')
+    @patch('quantdl.update.app.DataCollectors')
+    @patch('quantdl.update.app.CIKResolver')
+    @patch('quantdl.update.app.RateLimiter')
+    @patch('quantdl.update.app.CRSPDailyTicks')
+    @patch('quantdl.update.app.SecurityMaster')
+    @patch('quantdl.update.app.Ticks')
+    @patch('quantdl.update.app.TradingCalendar')
+    @patch('quantdl.update.app.setup_logger')
+    @patch('quantdl.update.app.S3Client')
+    @patch('quantdl.update.app.UploadConfig')
+    @patch.dict('os.environ', {
+        'ALPACA_API_KEY': 'test_key',
+        'ALPACA_API_SECRET': 'test_secret'
+    })
+    def test_init_wrds_unavailable_fallback_to_s3(
+        self, mock_config, mock_s3, mock_logger, mock_calendar,
+        mock_ticks, mock_security_master_class, mock_crsp,
+        mock_rate_limiter, mock_cik_resolver, mock_collectors,
+        mock_publishers, mock_sec_client, mock_universe
+    ):
+        """Test initialization falls back to S3-only SecurityMaster when WRDS unavailable"""
+        from quantdl.update.app import DailyUpdateApp
+
+        # Setup CRSP to fail initialization but not crash
+        mock_crsp_instance = Mock()
+        mock_crsp_instance._conn = None  # No WRDS connection
+        mock_security_master = Mock()
+        mock_crsp_instance.security_master = mock_security_master
+        mock_crsp.return_value = mock_crsp_instance
+
+        # Setup S3 client
+        mock_s3_instance = Mock()
+        mock_s3_instance.client = Mock()
+        mock_s3.return_value = mock_s3_instance
+
+        # Setup SecurityMaster fallback
+        mock_security_master_instance = Mock()
+        mock_security_master_class.return_value = mock_security_master_instance
+
+        app = DailyUpdateApp()
+
+        # Verify WRDS is unavailable but app still works
+        assert app._wrds_available is False
+
+    @patch('quantdl.update.app.UniverseManager')
+    @patch('quantdl.update.app.SECClient')
+    @patch('quantdl.update.app.DataPublishers')
+    @patch('quantdl.update.app.DataCollectors')
+    @patch('quantdl.update.app.CIKResolver')
+    @patch('quantdl.update.app.RateLimiter')
+    @patch('quantdl.update.app.CRSPDailyTicks')
+    @patch('quantdl.update.app.SecurityMaster')
+    @patch('quantdl.update.app.Ticks')
+    @patch('quantdl.update.app.TradingCalendar')
+    @patch('quantdl.update.app.setup_logger')
+    @patch('quantdl.update.app.S3Client')
+    @patch('quantdl.update.app.UploadConfig')
+    @patch.dict('os.environ', {
+        'ALPACA_API_KEY': 'test_key',
+        'ALPACA_API_SECRET': 'test_secret'
+    })
+    def test_init_wrds_exception_fallback(
+        self, mock_config, mock_s3, mock_logger, mock_calendar,
+        mock_ticks, mock_security_master_class, mock_crsp,
+        mock_rate_limiter, mock_cik_resolver, mock_collectors,
+        mock_publishers, mock_sec_client, mock_universe
+    ):
+        """Test initialization handles CRSP exception and falls back to S3"""
+        from quantdl.update.app import DailyUpdateApp
+
+        # Setup CRSP to raise exception
+        mock_crsp.side_effect = Exception("WRDS connection failed")
+
+        # Setup S3 client
+        mock_s3_instance = Mock()
+        mock_s3_instance.client = Mock()
+        mock_s3.return_value = mock_s3_instance
+
+        # Setup SecurityMaster fallback
+        mock_security_master_instance = Mock()
+        mock_security_master_class.return_value = mock_security_master_instance
+
+        app = DailyUpdateApp()
+
+        # Verify WRDS is unavailable, SecurityMaster loaded from S3
+        assert app._wrds_available is False
+        assert app.crsp_ticks is None
+        assert app.security_master == mock_security_master_instance
+        mock_security_master_class.assert_called_once()

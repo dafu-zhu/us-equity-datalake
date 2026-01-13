@@ -59,6 +59,9 @@ uv run quantdl-storage --run-derived-fundamental
 uv run quantdl-update --date 2025-01-10
 uv run quantdl-update  # defaults to yesterday
 uv run quantdl-update --no-ticks  # skip ticks, only fundamentals
+
+# Year consolidation (run on Jan 1 to consolidate previous year)
+uv run quantdl-consolidate --year 2025  # consolidates 2025 monthly → history.parquet
 ```
 
 ## Architecture
@@ -118,51 +121,64 @@ Data Sources → Collection → Validation → S3 Storage
 
 **Daily Update:**
 1. `DailyUpdateApp` checks if market was open yesterday
-2. For ticks: Fetch yesterday's data, append to yearly Parquet files
+2. For ticks: Fetch yesterday's data, append to current year monthly Parquet files
 3. For fundamentals: Check EDGAR filings in last N days, update if new 10-K/10-Q
 4. Upload updated files to S3
+5. Year consolidation (Jan 1): Merge previous year monthly files into history.parquet
 
 ### Storage Paths
 
 ```
 data/raw/
 ├── ticks/
-│   ├── daily/{symbol}/{YYYY}/{MM}/ticks.parquet
+│   ├── daily/{security_id}/
+│   │   ├── history.parquet                    # All completed years consolidated
+│   │   └── {current_year}/{MM}/ticks.parquet  # Current year (monthly partitions)
 │   └── minute/{symbol}/{YYYY}/{MM}/{DD}/ticks.parquet
-├── fundamental/{symbol}/fundamental.parquet
+├── fundamental/{cik}/fundamental.parquet
 data/derived/
-└── features/fundamental/{symbol}/
+└── features/fundamental/{cik}/
     ├── ttm.parquet
     └── metrics.parquet
 ```
 
 **Storage Strategy:**
-- Daily ticks: Partitioned by symbol, year, month
-- Minute ticks: Partitioned by symbol, year, month, day
-- Fundamentals: One file per symbol (all quarters/years combined)
-- Derived: One file per symbol per metric type
+- Daily ticks: Keyed by security_id; current year monthly, history consolidated
+- Minute ticks: Partitioned by symbol, year, month, day (unchanged)
+- Fundamentals: Keyed by CIK (one file per legal entity)
+- Derived: Keyed by CIK (one file per metric type)
 
 ### Key Design Decisions
 
-**1. CIK-Based Storage (Fundamentals)**
+**1. Security ID-Based Storage (Daily Ticks)**
+- Daily ticks stored under security_id (not symbol) to prevent collisions
+- SecurityMaster resolves symbol+date → security_id (tracks business continuity)
+- Current year uses monthly partitions (optimizes daily updates, ~5 KB files)
+- Completed years consolidated in history.parquet (optimizes multi-year queries, ~18 MB)
+- TicksClient provides symbol-based API with transparent security_id resolution
+- Session-based caching for symbol lookups (cleared on client reinitialization)
+- Year consolidation runs on Jan 1: merges 12 monthly → append to history
+
+**2. CIK-Based Storage (Fundamentals)**
 - Fundamentals stored under SEC CIK codes, not tickers
 - `CIKResolver` maps tickers to CIKs using SEC company tickers JSON
 - Prevents data loss during ticker changes/mergers
 
-**2. Symbol Normalization**
+**3. Symbol Normalization**
 - `SymbolNormalizer` converts CRSP format (BRKB) to Nasdaq format (BRK.B)
 - Uses `SecurityMaster` to verify same security_id before conversion
 - Keeps delisted stocks in original format
 
-**3. Parallel Processing**
+**4. Parallel Processing**
 - Daily ticks: Batch processing with rate limiting (200 symbols/batch)
 - Minute ticks: High parallelization (50 workers, 100+ concurrent S3 reads)
 - Fundamentals: Sequential with retry logic (EDGAR API limits)
 
-**4. Update Strategy**
+**5. Update Strategy**
 - Fundamentals: Check EDGAR for new 10-K/10-Q filings (lookback 7 days)
-- Ticks: Update only if trading day, append to existing Parquet files
-- Read-modify-write pattern for yearly/monthly Parquet files
+- Daily ticks: Update only if trading day, append to current year monthly files
+- Read-modify-write pattern for monthly Parquet files (~5 KB, fast updates)
+- Year consolidation: Jan 1 consolidates previous year into history.parquet
 
 ## Testing
 

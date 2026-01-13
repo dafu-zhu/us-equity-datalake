@@ -33,6 +33,7 @@ from quantdl.collection.alpaca_ticks import Ticks
 from quantdl.collection.crsp_ticks import CRSPDailyTicks
 from quantdl.collection.fundamental import SECClient
 from quantdl.universe.manager import UniverseManager
+from quantdl.master.security_master import SecurityMaster
 
 load_dotenv()
 
@@ -67,12 +68,30 @@ class DailyUpdateApp:
 
         # Initialize data fetchers
         self.alpaca_ticks = Ticks()
-        self.crsp_ticks = CRSPDailyTicks()
+
+        # Try WRDS, but allow S3-only mode for 2025+ operations
+        try:
+            self.crsp_ticks = CRSPDailyTicks(
+                s3_client=self.s3_client,
+                bucket_name='us-equity-datalake',
+                require_wrds=False  # Don't crash if WRDS unavailable
+            )
+            self.security_master = self.crsp_ticks.security_master
+            self._wrds_available = (self.crsp_ticks._conn is not None)
+        except Exception as e:
+            self.logger.warning(f"CRSPDailyTicks initialization failed: {e}, using S3-only mode")
+            self.crsp_ticks = None
+            # Initialize SecurityMaster directly from S3
+            self.security_master = SecurityMaster(
+                s3_client=self.s3_client,
+                bucket_name='us-equity-datalake'
+            )
+            self._wrds_available = False
 
         # Initialize universe manager
         self.universe_manager = UniverseManager(
-            crsp_fetcher=self.crsp_ticks,
-            security_master=self.crsp_ticks.security_master
+            crsp_fetcher=self.crsp_ticks if self._wrds_available else None,
+            security_master=self.security_master
         )
         self._symbols_cache: Dict[int, List[str]] = {}
 
@@ -90,7 +109,7 @@ class DailyUpdateApp:
 
         # Initialize CIK resolver
         self.cik_resolver = CIKResolver(
-            security_master=self.crsp_ticks.security_master,
+            security_master=self.security_master,
             logger=self.logger
         )
 
@@ -271,10 +290,10 @@ class DailyUpdateApp:
         """
         Update daily ticks for a specific date.
 
-        Directly replace daily data without downloading existing files.
-        Uses monthly partitioning to avoid large file downloads/uploads.
+        Uses monthly partitioning for current year to optimize updates.
+        Historical years stored in consolidated history.parquet file.
 
-        Storage: data/raw/ticks/daily/{symbol}/{YYYY}/{MM}/ticks.parquet
+        Storage: data/raw/ticks/daily/{security_id}/{YYYY}/{MM}/ticks.parquet
 
         :param update_date: Date to update (typically yesterday)
         :param symbols: List of symbols to update (if None, uses current universe)
@@ -309,6 +328,11 @@ class DailyUpdateApp:
         def process_symbol(sym: str) -> Dict[str, Optional[str]]:
             """Process single symbol update"""
             try:
+                # Resolve symbol to security_id
+                security_id = self.crsp_ticks.security_master.get_security_id(
+                    sym, update_date.isoformat()
+                )
+
                 ticks = symbol_bars.get(sym, [])
 
                 if not ticks:
@@ -333,8 +357,8 @@ class DailyUpdateApp:
                     self.logger.debug(f"Skipping {sym} daily ticks: empty DataFrame after parsing")
                     return {'symbol': sym, 'status': 'skipped', 'error': 'Empty DataFrame after parsing'}
 
-                # Check if monthly file exists
-                s3_key = f"data/raw/ticks/daily/{sym}/{year}/{month:02d}/ticks.parquet"
+                # Check if monthly file exists (security_id-based path)
+                s3_key = f"data/raw/ticks/daily/{security_id}/{year}/{month:02d}/ticks.parquet"
 
                 try:
                     response = self.s3_client.get_object(
@@ -373,15 +397,17 @@ class DailyUpdateApp:
                 buffer.seek(0)
 
                 metadata = {
-                    'symbol': sym,
+                    'security_id': str(security_id),
+                    'symbols': [sym],
                     'year': str(year),
                     'month': f"{month:02d}",
                     'data_type': 'daily_ticks',
                     'source': 'alpaca',
-                    'trading_days': str(len(updated_df))
+                    'trading_days': str(len(updated_df)),
+                    'partition_type': 'monthly'
                 }
                 metadata_prepared = {
-                    k: str(v) for k, v in metadata.items()
+                    k: str(v) if not isinstance(v, list) else str(v) for k, v in metadata.items()
                 }
 
                 self.data_publishers.upload_fileobj(buffer, s3_key, metadata_prepared)
@@ -416,6 +442,149 @@ class DailyUpdateApp:
 
         self.logger.info(
             f"Daily ticks update completed: {stats['success']} success, "
+            f"{stats['failed']} failed, {stats['skipped']} skipped"
+        )
+
+        return stats
+
+    def consolidate_year(
+        self,
+        year: int,
+        symbols: Optional[List[str]] = None,
+        max_workers: int = 50
+    ) -> Dict[str, int]:
+        """
+        Consolidate previous year's monthly files into history.parquet.
+
+        Run on Jan 1 to consolidate previous year data:
+        1. Read 12 monthly files for the year
+        2. Read existing history.parquet (if exists)
+        3. Concatenate all data
+        4. Write to history.parquet
+        5. Delete monthly files
+
+        :param year: Year to consolidate (e.g., 2025 on Jan 1, 2026)
+        :param symbols: List of symbols (if None, uses year's universe)
+        :param max_workers: Number of concurrent workers
+        :return: Dict with statistics
+        """
+        self.logger.info(f"Starting year consolidation for {year}")
+
+        # Load symbols if not provided
+        if symbols is None:
+            symbols = self._get_symbols_for_year(year)
+
+        stats = {'success': 0, 'failed': 0, 'skipped': 0}
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import io
+
+        def consolidate_symbol(sym: str) -> Dict[str, Optional[str]]:
+            """Consolidate monthly files for a single symbol"""
+            try:
+                # Resolve symbol to security_id
+                security_id = self.crsp_ticks.security_master.get_security_id(
+                    sym, f"{year}-12-31"
+                )
+
+                # Read all monthly files for the year
+                monthly_dfs = []
+                for month in range(1, 13):
+                    s3_key = f"data/raw/ticks/daily/{security_id}/{year}/{month:02d}/ticks.parquet"
+                    try:
+                        response = self.s3_client.get_object(
+                            Bucket=self.data_publishers.bucket_name,
+                            Key=s3_key
+                        )
+                        monthly_dfs.append(pl.read_parquet(response['Body']))
+                    except self.s3_client.exceptions.NoSuchKey:
+                        # Month file doesn't exist, skip
+                        continue
+                    except Exception as e:
+                        self.logger.warning(f"Could not read {s3_key}: {e}")
+                        continue
+
+                if not monthly_dfs:
+                    return {'symbol': sym, 'status': 'skipped', 'error': 'No monthly files found'}
+
+                # Combine monthly data
+                year_df = pl.concat(monthly_dfs).sort('timestamp')
+
+                # Read existing history file if it exists
+                history_key = f"data/raw/ticks/daily/{security_id}/history.parquet"
+                try:
+                    response = self.s3_client.get_object(
+                        Bucket=self.data_publishers.bucket_name,
+                        Key=history_key
+                    )
+                    history_df = pl.read_parquet(response['Body'])
+                    # Concatenate with new year data
+                    combined_df = pl.concat([history_df, year_df]).sort('timestamp')
+                except self.s3_client.exceptions.NoSuchKey:
+                    # No history file yet, use year data only
+                    combined_df = year_df
+
+                # Write consolidated history file
+                buffer = io.BytesIO()
+                combined_df.write_parquet(buffer)
+                buffer.seek(0)
+
+                metadata = {
+                    'security_id': str(security_id),
+                    'symbols': [sym],
+                    'data_type': 'daily_ticks',
+                    'source': 'mixed',  # Could be CRSP + Alpaca
+                    'trading_days': str(len(combined_df)),
+                    'partition_type': 'history',
+                    'years_included': f"All up to {year}"
+                }
+                metadata_prepared = {
+                    k: str(v) for k, v in metadata.items()
+                }
+
+                self.data_publishers.upload_fileobj(buffer, history_key, metadata_prepared)
+
+                # Delete monthly files after successful upload
+                for month in range(1, 13):
+                    s3_key = f"data/raw/ticks/daily/{security_id}/{year}/{month:02d}/ticks.parquet"
+                    try:
+                        self.s3_client.delete_object(
+                            Bucket=self.data_publishers.bucket_name,
+                            Key=s3_key
+                        )
+                    except Exception as e:
+                        self.logger.debug(f"Could not delete {s3_key}: {e}")
+
+                return {'symbol': sym, 'status': 'success', 'error': None}
+
+            except Exception as e:
+                self.logger.error(f"Error consolidating {sym}: {e}")
+                return {'symbol': sym, 'status': 'failed', 'error': str(e)}
+
+        # Process symbols concurrently
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(consolidate_symbol, sym): sym for sym in symbols}
+
+            for future in as_completed(futures):
+                result = future.result()
+
+                if result['status'] == 'success':
+                    stats['success'] += 1
+                elif result['status'] == 'skipped':
+                    stats['skipped'] += 1
+                else:
+                    stats['failed'] += 1
+
+                # Progress logging
+                total_processed = stats['success'] + stats['failed'] + stats['skipped']
+                if total_processed % 100 == 0:
+                    self.logger.info(
+                        f"Progress: {total_processed}/{len(symbols)} "
+                        f"({stats['success']} success, {stats['failed']} failed, {stats['skipped']} skipped)"
+                    )
+
+        self.logger.info(
+            f"Year consolidation completed: {stats['success']} success, "
             f"{stats['failed']} failed, {stats['skipped']} skipped"
         )
 

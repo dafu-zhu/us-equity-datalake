@@ -25,6 +25,7 @@ from quantdl.storage.data_publishers import DataPublishers
 from quantdl.collection.alpaca_ticks import Ticks
 from quantdl.collection.crsp_ticks import CRSPDailyTicks
 from quantdl.universe.manager import UniverseManager
+from quantdl.master.security_master import SecurityMaster
 
 load_dotenv()
 
@@ -50,12 +51,33 @@ class UploadApp:
 
         # Initialize data fetchers once to reuse connections
         self.alpaca_ticks = Ticks()
-        self.crsp_ticks = CRSPDailyTicks()
 
-        # Initialize universe manager (reuse WRDS connection)
+        # Try WRDS connection (needed for <2025 backfill, optional for 2025+)
+        try:
+            self.crsp_ticks = CRSPDailyTicks(
+                s3_client=self.client,
+                bucket_name='us-equity-datalake',
+                require_wrds=False  # Allow init without WRDS
+            )
+            self.security_master = self.crsp_ticks.security_master
+            self._wrds_available = (self.crsp_ticks._conn is not None)
+
+            if not self._wrds_available:
+                self.logger.warning(
+                    "WRDS connection unavailable. "
+                    "Can upload 2025+ data (Alpaca), but cannot backfill <2025 (CRSP required)."
+                )
+        except Exception as e:
+            self.logger.error(f"CRSPDailyTicks initialization failed: {e}")
+            raise RuntimeError(
+                "Cannot initialize UploadApp without SecurityMaster. "
+                "Ensure S3 export exists: uv run quantdl-export-security-master --export"
+            )
+
+        # Initialize universe manager
         self.universe_manager = UniverseManager(
-            crsp_fetcher=self.crsp_ticks,
-            security_master=self.crsp_ticks.security_master
+            crsp_fetcher=self.crsp_ticks if self._wrds_available else None,
+            security_master=self.security_master
         )
 
         # Initialize trading calendar
@@ -75,7 +97,7 @@ class UploadApp:
 
         # Initialize helper modules
         self.cik_resolver = CIKResolver(
-            security_master=self.crsp_ticks.security_master,
+            security_master=self.security_master,
             logger=self.logger
         )
 
@@ -112,8 +134,8 @@ class UploadApp:
         Returns dict with status for progress tracking.
 
         Storage:
-        - Monthly: data/raw/ticks/daily/{symbol}/{YYYY}/{MM}/ticks.parquet (recommended)
-        - Yearly: data/raw/ticks/daily/{symbol}/{YYYY}/ticks.parquet (legacy)
+        - Monthly (current year): data/raw/ticks/daily/{security_id}/{YYYY}/{MM}/ticks.parquet
+        - History (completed years): data/raw/ticks/daily/{security_id}/history.parquet
 
         :param sym: Symbol in Alpaca format (e.g., 'BRK.B')
         :param year: Year to fetch data for
@@ -121,6 +143,9 @@ class UploadApp:
         :param overwrite: If True, skip existence check and overwrite existing data
         :param use_monthly_partitions: If True, use monthly partitioning (default)
         """
+        # Resolve symbol to security_id
+        security_id = self.crsp_ticks.security_master.get_security_id(sym, f"{year}-12-31")
+
         # Validate: Check if data already exists (before collection)
         if not overwrite and self.validator.data_exists(sym, 'ticks', year, month):
             return {
@@ -139,9 +164,9 @@ class UploadApp:
 
         # Publish to S3
         if use_monthly_partitions and month is not None:
-            return self.data_publishers.publish_daily_ticks(sym, year, df, month=month, by_year=False)
+            return self.data_publishers.publish_daily_ticks(sym, year, security_id, df, month=month, by_year=False)
         else:
-            return self.data_publishers.publish_daily_ticks(sym, year, df, by_year=False)
+            return self.data_publishers.publish_daily_ticks(sym, year, security_id, df, by_year=False)
 
     def upload_daily_ticks(
         self,
@@ -172,6 +197,14 @@ class UploadApp:
         :param use_monthly_partitions: If True, use monthly partitions (default: True)
         :param by_year: If True, collect year data once and publish monthly partitions in parallel
         """
+        # NEW: Check WRDS availability for historical years
+        if year < 2025 and not self._wrds_available:
+            raise RuntimeError(
+                f"Cannot upload daily ticks for year {year}: WRDS connection required for CRSP data (years < 2025). "
+                "Available: Alpaca data only (2025+). "
+                "To backfill historical data, ensure WRDS credentials are set."
+            )
+
         # Load symbols for this year
         alpaca_symbols = self.universe_manager.load_symbols_for_year(year, sym_type='alpaca')
 
@@ -225,10 +258,12 @@ class UploadApp:
                         )
 
                         for sym in chunk:
+                            security_id = self.crsp_ticks.security_master.get_security_id(sym, f"{year}-12-31")
                             df = symbol_map.get(sym, pl.DataFrame())
                             result = self.data_publishers.publish_daily_ticks(
                                 sym,
                                 year,
+                                security_id,
                                 df,
                                 month=month,
                                 by_year=False
@@ -282,6 +317,8 @@ class UploadApp:
                             completed += 1
                             continue
 
+                    security_id = self.crsp_ticks.security_master.get_security_id(sym, f"{year}-12-31")
+
                     year_df = None
                     if year < 2025:
                         year_df = bulk_year_map.get(sym, pl.DataFrame())
@@ -289,6 +326,7 @@ class UploadApp:
                     result = self.data_publishers.publish_daily_ticks(
                         sym,
                         year,
+                        security_id,
                         df=None,
                         by_year=True,
                         year_df=year_df
@@ -390,10 +428,12 @@ class UploadApp:
                     )
 
                     for sym in chunk:
+                        security_id = self.crsp_ticks.security_master.get_security_id(sym, f"{year}-12-31")
                         df = symbol_map.get(sym, pl.DataFrame())
                         result = self.data_publishers.publish_daily_ticks(
                             sym,
                             year,
+                            security_id,
                             df,
                             month=None,
                             by_year=False

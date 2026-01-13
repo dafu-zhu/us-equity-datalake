@@ -6,9 +6,11 @@ import os
 import time
 import requests
 import datetime as dt
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 from pathlib import Path
 import logging
+import io
+import pyarrow.parquet as pq
 
 from quantdl.utils.logger import setup_logger
 from quantdl.universe.current import fetch_all_stocks
@@ -168,21 +170,33 @@ class SecurityMaster:
     """
     Map stock symbols, CIKs, CUSIPs across time horizon using WRDS
     """
-    def __init__(self, db: Optional[wrds.Connection] = None):
-        if db is None:
-            username = os.getenv('WRDS_USERNAME')
-            password = os.getenv('WRDS_PASSWORD')
-            if not username or not password:
-                raise ValueError(
-                    "WRDS credentials not found. Set WRDS_USERNAME and WRDS_PASSWORD environment variables."
-                )
-            self.db = wrds.Connection(
-                wrds_username=username,
-                wrds_password=password
-            )
-        else:
-            self.db = db
+    # CRSP data coverage end date
+    CRSP_LATEST_DATE = '2024-12-31'
 
+    def __init__(
+        self,
+        db: Optional[wrds.Connection] = None,
+        s3_client = None,
+        bucket_name: str = 'us-equity-datalake',
+        s3_key: str = 'data/master/security_master.parquet',
+        force_rebuild: bool = False
+    ):
+        """
+        Initialize SecurityMaster with lazy S3 loading.
+
+        Loading sequence:
+        1. If force_rebuild: Build from WRDS
+        2. Try S3 (fast path)
+        3. If S3 fails: Build from WRDS (slow path)
+        4. If built from WRDS: Auto-export to S3
+
+        :param db: Optional WRDS connection
+        :param s3_client: Optional S3 client for lazy loading
+        :param bucket_name: S3 bucket name
+        :param s3_key: S3 key for security master
+        :param force_rebuild: If True, skip S3 and rebuild from WRDS
+        """
+        # Setup logger first (needed for all paths)
         self.logger = setup_logger(
             name="master.SecurityMaster",
             log_dir=Path("data/logs/master"),
@@ -191,9 +205,61 @@ class SecurityMaster:
 
         # Cache for SEC CIK mapping (loaded on-demand)
         self._sec_cik_cache: Optional[pl.DataFrame] = None
+        self._from_s3 = False
+
+        # Try S3 lazy loading (FAST PATH)
+        if not force_rebuild and s3_client:
+            try:
+                self.master_tb, metadata = self._load_from_s3(s3_client, bucket_name, s3_key)
+
+                # Validate metadata
+                crsp_end = metadata.get('crsp_end_date')
+                if crsp_end != self.CRSP_LATEST_DATE:
+                    self.logger.warning(
+                        f"S3 data stale: crsp_end_date={crsp_end} vs expected={self.CRSP_LATEST_DATE}, rebuilding from WRDS"
+                    )
+                    raise ValueError("Stale S3 data")
+
+                self._from_s3 = True
+                self.logger.info(f"Loaded SecurityMaster from S3 ({len(self.master_tb)} rows, CRSP end: {crsp_end})")
+
+                # Setup minimal WRDS connection for close() compatibility
+                # (won't be used for queries if loaded from S3)
+                self.db = db
+                self.cik_cusip = None  # Not needed when loaded from S3
+                return
+
+            except Exception as e:
+                self.logger.info(f"S3 load failed ({type(e).__name__}: {e}), falling back to WRDS")
+
+        # Build from WRDS (SLOW PATH)
+        if db is None:
+            username = os.getenv('WRDS_USERNAME')
+            password = os.getenv('WRDS_PASSWORD')
+            if not username or not password:
+                raise ValueError(
+                    "WRDS credentials not found. Set WRDS_USERNAME and WRDS_PASSWORD environment variables. "
+                    "Alternatively, export SecurityMaster to S3 first using: "
+                    "uv run quantdl-export-security-master --export"
+                )
+            self.db = wrds.Connection(
+                wrds_username=username,
+                wrds_password=password
+            )
+        else:
+            self.db = db
 
         self.cik_cusip = self.cik_cusip_mapping()
         self.master_tb = self.master_table()
+        self._from_s3 = False
+
+        # Auto-export to S3 if client provided
+        if s3_client:
+            try:
+                self.export_to_s3(s3_client, bucket_name, s3_key)
+                self.logger.info("Auto-exported SecurityMaster to S3 for next time")
+            except Exception as e:
+                self.logger.warning(f"Auto-export to S3 failed: {e}")
     
     def _fetch_sec_cik_mapping(self) -> pl.DataFrame:
         """
@@ -691,7 +757,93 @@ class SecurityMaster:
         )
         return result
 
+    def export_to_s3(
+        self,
+        s3_client,
+        bucket_name: str = 'us-equity-datalake',
+        s3_key: str = 'data/master/security_master.parquet'
+    ) -> Dict[str, str]:
+        """
+        Export master_tb to S3 with embedded metadata.
+
+        Metadata (Parquet custom_metadata):
+        - crsp_end_date: 2024-12-31
+        - export_timestamp: ISO8601 UTC
+        - version: 1.0
+        - row_count: Number of rows
+
+        :param s3_client: Boto3 S3 client
+        :param bucket_name: S3 bucket name
+        :param s3_key: S3 key for export
+        :return: Dict with status and timestamp
+        """
+        # Convert to Arrow table
+        table = self.master_tb.to_arrow()
+
+        # Embed metadata
+        metadata = {
+            b'crsp_end_date': self.CRSP_LATEST_DATE.encode(),
+            b'export_timestamp': dt.datetime.utcnow().isoformat().encode(),
+            b'version': b'1.0',
+            b'row_count': str(len(self.master_tb)).encode()
+        }
+        existing_meta = table.schema.metadata or {}
+        combined_meta = {**existing_meta, **metadata}
+        table = table.replace_schema_metadata(combined_meta)
+
+        # Write to buffer and upload
+        buffer = io.BytesIO()
+        pq.write_table(table, buffer)
+        buffer.seek(0)
+
+        s3_client.upload_fileobj(
+            buffer,
+            bucket_name,
+            s3_key
+        )
+
+        export_ts = dt.datetime.utcnow().isoformat()
+        self.logger.info(f"Exported SecurityMaster to s3://{bucket_name}/{s3_key} ({len(self.master_tb)} rows)")
+        return {'status': 'success', 'export_timestamp': export_ts}
+
+    def _load_from_s3(
+        self,
+        s3_client,
+        bucket_name: str,
+        s3_key: str
+    ) -> Tuple[pl.DataFrame, Dict[str, str]]:
+        """
+        Load master_tb from S3 with metadata extraction.
+
+        :param s3_client: Boto3 S3 client
+        :param bucket_name: S3 bucket name
+        :param s3_key: S3 key
+        :return: Tuple of (master_tb DataFrame, metadata dict)
+        :raises: Exception if load fails
+        """
+        # Download from S3
+        response = s3_client.get_object(Bucket=bucket_name, Key=s3_key)
+
+        # Read Parquet with metadata
+        buffer = io.BytesIO(response['Body'].read())
+        table = pq.read_table(buffer)
+
+        # Extract custom metadata
+        metadata = {}
+        if table.schema.metadata:
+            metadata = {
+                k.decode(): v.decode()
+                for k, v in table.schema.metadata.items()
+            }
+
+        # Convert to Polars
+        df = pl.from_arrow(table)
+
+        self.logger.debug(f"Loaded SecurityMaster from S3: {len(df)} rows, metadata: {metadata}")
+        return df, metadata
+
     def close(self):
         """Close WRDS connection"""
-        self.db.close()
+        if self.db is not None:
+            self.db.close()
     
