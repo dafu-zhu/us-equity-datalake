@@ -13,7 +13,7 @@ import os
 import logging
 import datetime as dt
 from pathlib import Path
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import polars as pl
@@ -279,16 +279,26 @@ class DailyUpdateAppNoWRDS:
                     f"{[f['form'] for f in recent_filings]}"
                 )
 
-            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': len(recent_filings) > 0}
+            return {
+                'symbol': symbol,
+                'cik': cik,
+                'has_recent_filing': len(recent_filings) > 0,
+                'filing_types': [f['form'] for f in recent_filings]
+            }
 
     def get_symbols_with_recent_filings(
         self,
         symbols: List[str],
         update_date: dt.date,
         lookback_days: int = 7
-    ) -> Set[str]:
-        """Identify symbols that have new EDGAR filings (parallelized)."""
+    ) -> Tuple[Set[str], Dict[str, int]]:
+        """Identify symbols that have new EDGAR filings (parallelized).
+
+        Returns:
+            Tuple of (symbols_with_filings, filing_type_counts)
+        """
         symbols_with_filings = set()
+        filing_stats: Dict[str, int] = {}
 
         self.logger.info(f"Checking EDGAR for recent filings ({lookback_days} day lookback)...")
 
@@ -316,17 +326,22 @@ class DailyUpdateAppNoWRDS:
                 result = future.result()
                 if result['has_recent_filing']:
                     symbols_with_filings.add(result['symbol'])
+                    # Count filing types
+                    for form in result['filing_types']:
+                        filing_stats[form] = filing_stats.get(form, 0) + 1
 
                 checked += 1
                 if checked % 100 == 0:
                     self.logger.info(f"Checked {checked}/{len(symbol_to_cik)} symbols for filings")
 
+        # Log filing breakdown
+        stats_str = ", ".join(f"{k}: {v}" for k, v in sorted(filing_stats.items()))
         self.logger.info(
             f"Found {len(symbols_with_filings)} symbols with recent filings "
-            f"out of {len(symbol_to_cik)} checked"
+            f"out of {len(symbol_to_cik)} checked ({stats_str})"
         )
 
-        return symbols_with_filings
+        return symbols_with_filings, filing_stats
 
     def update_daily_ticks(
         self,
@@ -650,6 +665,17 @@ class DailyUpdateAppNoWRDS:
         self.logger.info(f"Starting daily update for {target_date} (WRDS-free mode)")
         self.logger.info(f"=" * 80)
 
+        # Update SecurityMaster from SEC (extend end_dates for active securities)
+        self.logger.info("Updating SecurityMaster from SEC...")
+        sm_stats = self.security_master.update_from_sec(
+            s3_client=self.s3_client,
+            bucket_name='us-equity-datalake'
+        )
+        self.logger.info(
+            f"SecurityMaster: {sm_stats['extended']} extended, "
+            f"{sm_stats['added']} added, {sm_stats['unchanged']} unchanged"
+        )
+
         # Get current universe
         symbols = self._get_symbols()
 
@@ -676,7 +702,7 @@ class DailyUpdateAppNoWRDS:
         if update_fundamentals:
             self.logger.info("Checking EDGAR for recent filings...")
 
-            symbols_with_filings = self.get_symbols_with_recent_filings(
+            symbols_with_filings, filing_stats = self.get_symbols_with_recent_filings(
                 symbols=symbols,
                 update_date=target_date,
                 lookback_days=fundamental_lookback_days

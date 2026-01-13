@@ -425,10 +425,13 @@ class TestGetSymbolsWithRecentFilings:
         # Mock _check_filing to return results based on symbol
         def mock_check_filing(symbol, cik, lookback, semaphore):
             has_filing = symbol == 'AAPL'
-            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': has_filing}
+            return {
+                'symbol': symbol, 'cik': cik, 'has_recent_filing': has_filing,
+                'filing_types': ['10-K'] if has_filing else []
+            }
 
         with patch.object(app, '_check_filing', side_effect=mock_check_filing):
-            result = app.get_symbols_with_recent_filings(
+            result, filing_stats = app.get_symbols_with_recent_filings(
                 update_date=dt.date(2024, 6, 1),
                 symbols=['AAPL', 'MSFT', 'GOOGL'],
                 lookback_days=7
@@ -436,6 +439,7 @@ class TestGetSymbolsWithRecentFilings:
 
             # Only AAPL should have recent filings
             assert result == {'AAPL'}
+            assert filing_stats == {'10-K': 1}
 
             # Verify batch CIK resolver was called
             mock_cik_resolver_instance.batch_prefetch_ciks.assert_called_once_with(
@@ -480,10 +484,10 @@ class TestGetSymbolsWithRecentFilings:
 
         # Mock _check_filing to return no filings
         def mock_check_filing(symbol, cik, lookback, semaphore):
-            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': False}
+            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': False, 'filing_types': []}
 
         with patch.object(app, '_check_filing', side_effect=mock_check_filing):
-            result = app.get_symbols_with_recent_filings(
+            result, filing_stats = app.get_symbols_with_recent_filings(
                 update_date=dt.date(2024, 6, 1),
                 symbols=symbols,
                 lookback_days=7
@@ -1708,10 +1712,11 @@ class TestRunDailyUpdate:
         app = DailyUpdateApp()
 
         # Mock all update methods
-        with patch.object(app, 'check_market_open', return_value=True), \
+        with patch.object(app.security_master, 'update_from_sec', return_value={'extended': 10, 'added': 0, 'unchanged': 0}), \
+             patch.object(app, 'check_market_open', return_value=True), \
              patch.object(app, 'update_daily_ticks', return_value={'success': 2, 'failed': 0, 'skipped': 0}), \
              patch.object(app, 'update_minute_ticks', return_value={'success': 2, 'failed': 0, 'skipped': 0}), \
-             patch.object(app, 'get_symbols_with_recent_filings', return_value={'AAPL'}), \
+             patch.object(app, 'get_symbols_with_recent_filings', return_value=({'AAPL'}, {'10-K': 1})), \
              patch.object(app, 'update_fundamental', return_value={'success': 1, 'failed': 0, 'skipped': 0}):
 
             # Call method
@@ -1761,10 +1766,11 @@ class TestRunDailyUpdate:
         app = DailyUpdateApp()
 
         # Mock check_market_open to return False
-        with patch.object(app, 'check_market_open', return_value=False), \
+        with patch.object(app.security_master, 'update_from_sec', return_value={'extended': 0, 'added': 0, 'unchanged': 0}), \
+             patch.object(app, 'check_market_open', return_value=False), \
              patch.object(app, 'update_daily_ticks') as mock_daily, \
              patch.object(app, 'update_minute_ticks') as mock_minute, \
-             patch.object(app, 'get_symbols_with_recent_filings', return_value=set()), \
+             patch.object(app, 'get_symbols_with_recent_filings', return_value=(set(), {})), \
              patch.object(app, 'update_fundamental'):
 
             # Call method
@@ -1810,10 +1816,11 @@ class TestRunDailyUpdate:
         app = DailyUpdateApp()
 
         # Mock methods
-        with patch.object(app, 'check_market_open', return_value=True), \
+        with patch.object(app.security_master, 'update_from_sec', return_value={'extended': 0, 'added': 0, 'unchanged': 0}), \
+             patch.object(app, 'check_market_open', return_value=True), \
              patch.object(app, 'update_daily_ticks', return_value={'success': 1, 'failed': 0, 'skipped': 0}), \
              patch.object(app, 'update_minute_ticks', return_value={'success': 1, 'failed': 0, 'skipped': 0}), \
-             patch.object(app, 'get_symbols_with_recent_filings', return_value=set()):
+             patch.object(app, 'get_symbols_with_recent_filings', return_value=(set(), {})):
 
             # Call method without target_date
             app.run_daily_update(target_date=None)
@@ -1909,6 +1916,7 @@ class TestParallelFilingChecks:
         assert result['symbol'] == "AAPL"
         assert result['cik'] == "0000320193"
         assert result['has_recent_filing'] is True
+        assert result['filing_types'] == ['10-Q']
         app.get_recent_edgar_filings.assert_called_once_with("0000320193", 7)
 
     @patch('quantdl.update.app.UniverseManager')
@@ -1945,6 +1953,7 @@ class TestParallelFilingChecks:
         assert result['symbol'] == "MSFT"
         assert result['cik'] == "0000789019"
         assert result['has_recent_filing'] is False
+        assert result['filing_types'] == []
 
     @patch('quantdl.update.app.UniverseManager')
     @patch('quantdl.update.app.SECClient')
@@ -1982,6 +1991,7 @@ class TestParallelFilingChecks:
 
         assert result['symbol'] == "AAPL"
         assert result['cik'] == "0000320193"
+        assert result['filing_types'] == ['8-K']
 
     @patch('quantdl.update.app.UniverseManager')
     @patch('quantdl.update.app.SECClient')
@@ -2022,6 +2032,7 @@ class TestParallelFilingChecks:
         assert result['symbol'] == "AAPL"
         assert result['cik'] == "0000320193"
         assert result['has_recent_filing'] is True  # 10-K should trigger
+        assert result['filing_types'] == ['8-K', '10-K', '4']
 
     @patch('quantdl.update.app.UniverseManager')
     @patch('quantdl.update.app.SECClient')
@@ -2061,14 +2072,15 @@ class TestParallelFilingChecks:
         # Mock EDGAR filing checks
         def mock_check_filing(symbol, cik, lookback, semaphore):
             has_filing = symbol in ['AAPL', 'GOOGL']
-            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': has_filing}
+            filing_types = ['10-K'] if symbol == 'AAPL' else ['10-Q'] if symbol == 'GOOGL' else []
+            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': has_filing, 'filing_types': filing_types}
 
         app._check_filing = Mock(side_effect=mock_check_filing)
 
         update_date = dt.date(2024, 6, 30)
         symbols = ['AAPL', 'MSFT', 'GOOGL']
 
-        result = app.get_symbols_with_recent_filings(update_date, symbols, lookback_days=7)
+        result, filing_stats = app.get_symbols_with_recent_filings(update_date, symbols, lookback_days=7)
 
         # Verify batch CIK resolution was used
         mock_cik_resolver_instance.batch_prefetch_ciks.assert_called_once_with(
@@ -2080,6 +2092,7 @@ class TestParallelFilingChecks:
 
         # Verify result
         assert result == {'AAPL', 'GOOGL'}
+        assert filing_stats == {'10-K': 1, '10-Q': 1}
 
     @patch('quantdl.update.app.UniverseManager')
     @patch('quantdl.update.app.SECClient')
@@ -2116,12 +2129,12 @@ class TestParallelFilingChecks:
         }
         app.cik_resolver = mock_cik_resolver_instance
 
-        app._check_filing = Mock(return_value={'symbol': 'AAPL', 'cik': '0000320193', 'has_recent_filing': True})
+        app._check_filing = Mock(return_value={'symbol': 'AAPL', 'cik': '0000320193', 'has_recent_filing': True, 'filing_types': ['10-K']})
 
         update_date = dt.date(2024, 6, 30)
         symbols = ['AAPL', 'MSFT', 'GOOGL']
 
-        result = app.get_symbols_with_recent_filings(update_date, symbols, lookback_days=7)
+        result, filing_stats = app.get_symbols_with_recent_filings(update_date, symbols, lookback_days=7)
 
         # Verify only 2 symbols checked (MSFT skipped due to NULL CIK)
         assert app._check_filing.call_count == 2

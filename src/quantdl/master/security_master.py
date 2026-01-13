@@ -305,6 +305,37 @@ class SecurityMaster:
             # Return empty DataFrame on failure
             return pl.DataFrame({'ticker': [], 'cik': []}, schema={'ticker': pl.Utf8, 'cik': pl.Utf8})
 
+    def _fetch_sec_mapping_full(self) -> pl.DataFrame:
+        """
+        Fetch SEC mapping with company title for SecurityMaster updates.
+
+        Returns DataFrame with columns: [ticker, cik, title]
+        - ticker: CRSP format (separators removed)
+        - cik: Zero-padded 10-digit string
+        - title: Company name
+        """
+        url = "https://www.sec.gov/files/company_tickers.json"
+        headers = {'User-Agent': os.getenv('SEC_USER_AGENT', 'name@example.com')}
+
+        self.logger.info("Fetching SEC company tickers for SecurityMaster update...")
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+
+        data = response.json()
+
+        records = []
+        for entry in data.values():
+            # Normalize ticker to CRSP format (remove separators)
+            ticker = str(entry.get('ticker', '')).replace('.', '').replace('-', '').upper()
+            cik = str(entry.get('cik_str', '')).zfill(10)
+            title = str(entry.get('title', ''))
+
+            if ticker and cik != '0000000000':
+                records.append({'ticker': ticker, 'cik': cik, 'title': title})
+
+        self.logger.info(f"Loaded {len(records)} tickers from SEC")
+        return pl.DataFrame(records)
+
     def cik_cusip_mapping(self) -> pl.DataFrame:
         """
         All historical mappings, updated until Dec 31, 2024
@@ -841,6 +872,93 @@ class SecurityMaster:
 
         self.logger.debug(f"Loaded SecurityMaster from S3: {len(df)} rows, metadata: {metadata}")
         return df, metadata
+
+    def update_from_sec(
+        self,
+        s3_client=None,
+        bucket_name: str = 'us-equity-datalake'
+    ) -> Dict[str, int]:
+        """
+        Update master_tb from SEC company_tickers.json (WRDS-free updates).
+
+        1. For existing securities with stale end_date: extend to today if still in SEC
+        2. For new securities in SEC but not in master_tb: add with new security_id
+
+        :param s3_client: Optional S3 client to export updated master_tb
+        :param bucket_name: S3 bucket name for export
+        :return: Dict with counts {'extended': N, 'added': N, 'unchanged': N}
+        """
+        try:
+            sec_df = self._fetch_sec_mapping_full()
+        except Exception as e:
+            self.logger.error(f"Failed to fetch SEC data: {e}")
+            return {'extended': 0, 'added': 0, 'unchanged': 0, 'error': str(e)}
+
+        today = dt.date.today()
+        stats = {'extended': 0, 'added': 0, 'unchanged': 0}
+
+        # Create lookup set for SEC securities: (symbol, cik)
+        sec_set = set(zip(sec_df['ticker'].to_list(), sec_df['cik'].to_list()))
+
+        # 1. Extend end_date for existing securities still in SEC list
+        # Build updated rows list
+        updated_rows = []
+        for row in self.master_tb.iter_rows(named=True):
+            key = (row['symbol'], row['cik'])
+            if key in sec_set and row['end_date'] < today:
+                # Extend end_date to today
+                updated_row = dict(row)
+                updated_row['end_date'] = today
+                updated_rows.append(updated_row)
+                stats['extended'] += 1
+            else:
+                updated_rows.append(dict(row))
+                stats['unchanged'] += 1
+
+        # Rebuild master_tb with updated end_dates
+        if stats['extended'] > 0:
+            self.master_tb = pl.DataFrame(updated_rows)
+
+        # 2. Add new securities not in master_tb
+        existing_keys = set(zip(
+            self.master_tb['symbol'].to_list(),
+            self.master_tb['cik'].to_list()
+        ))
+        max_sid = self.master_tb['security_id'].max()
+
+        new_rows = []
+        for row in sec_df.iter_rows(named=True):
+            key = (row['ticker'], row['cik'])
+            if key not in existing_keys:
+                max_sid += 1
+                new_rows.append({
+                    'security_id': max_sid,
+                    'symbol': row['ticker'],
+                    'company': row['title'],
+                    'cik': row['cik'],
+                    'cusip': None,
+                    'start_date': today,
+                    'end_date': today
+                })
+                stats['added'] += 1
+
+        if new_rows:
+            new_df = pl.DataFrame(new_rows).cast({
+                'security_id': pl.Int64,
+                'start_date': pl.Date,
+                'end_date': pl.Date
+            })
+            self.master_tb = pl.concat([self.master_tb, new_df])
+
+        # 3. Export to S3 if changes made
+        if s3_client and (stats['extended'] > 0 or stats['added'] > 0):
+            self.export_to_s3(s3_client, bucket_name)
+            self.logger.info(
+                f"SecurityMaster updated: {stats['extended']} extended, "
+                f"{stats['added']} added, {stats['unchanged']} unchanged"
+            )
+
+        return stats
 
     def close(self):
         """Close WRDS connection"""

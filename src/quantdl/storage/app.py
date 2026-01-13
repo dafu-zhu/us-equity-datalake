@@ -57,7 +57,7 @@ class UploadApp:
             self.crsp_ticks = CRSPDailyTicks(
                 s3_client=self.client,
                 bucket_name='us-equity-datalake',
-                require_wrds=False  # Allow init without WRDS
+                require_wrds=True  # Require WRDS for historical data (<2025)
             )
             self.security_master = self.crsp_ticks.security_master
             self._wrds_available = (self.crsp_ticks._conn is not None)

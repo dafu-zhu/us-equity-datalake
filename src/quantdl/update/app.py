@@ -12,7 +12,7 @@ import os
 import logging
 import datetime as dt
 from pathlib import Path
-from typing import List, Dict, Optional, Set
+from typing import List, Dict, Optional, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 import requests
@@ -207,43 +207,37 @@ class DailyUpdateApp:
             return []
 
     def _check_filing(self, symbol: str, cik: str, lookback_days: int, semaphore: Semaphore) -> Dict:
-        """
-        Check if a symbol has recent filings (helper for parallel execution)
-        Only 10-K and 10-Q forms trigger updates.
-
-        :param symbol: Symbol to check
-        :param cik: CIK for the symbol
-        :param lookback_days: Number of days to look back
-        :param semaphore: Semaphore for rate limiting
-        :return: Dict with symbol and has_recent_filing boolean
-        """
+        """Check if a symbol has recent filings (helper for parallel execution)."""
         with semaphore:
-            time.sleep(0.1)  # Rate limit: 10 req/sec (0.1s between requests)
+            time.sleep(0.1)
             recent_filings = self.get_recent_edgar_filings(cik, lookback_days)
 
             if recent_filings:
                 self.logger.debug(
-                    f"{symbol} (CIK {cik}): {len(recent_filings)} recent 10-K/10-Q filings - "
+                    f"{symbol} (CIK {cik}): {len(recent_filings)} recent filings - "
                     f"{[f['form'] for f in recent_filings]}"
                 )
 
-            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': len(recent_filings) > 0}
+            return {
+                'symbol': symbol,
+                'cik': cik,
+                'has_recent_filing': len(recent_filings) > 0,
+                'filing_types': [f['form'] for f in recent_filings]
+            }
 
     def get_symbols_with_recent_filings(
         self,
         update_date: dt.date,
         symbols: List[str],
         lookback_days: int = 7
-    ) -> Set[str]:
-        """
-        Identify symbols that have new EDGAR filings (parallelized).
+    ) -> Tuple[Set[str], Dict[str, int]]:
+        """Identify symbols that have new EDGAR filings (parallelized).
 
-        :param update_date: Date to update (typically yesterday)
-        :param symbols: List of symbols to check
-        :param lookback_days: Number of days to look back
-        :return: Set of symbols with recent filings
+        Returns:
+            Tuple of (symbols_with_filings, filing_type_counts)
         """
         symbols_with_filings = set()
+        filing_stats: Dict[str, int] = {}
 
         self.logger.info(f"Checking EDGAR for recent filings ({lookback_days} day lookback)...")
 
@@ -271,17 +265,22 @@ class DailyUpdateApp:
                 result = future.result()
                 if result['has_recent_filing']:
                     symbols_with_filings.add(result['symbol'])
+                    # Count filing types
+                    for form in result['filing_types']:
+                        filing_stats[form] = filing_stats.get(form, 0) + 1
 
                 checked += 1
                 if checked % 100 == 0:
                     self.logger.info(f"Checked {checked}/{len(symbol_to_cik)} symbols for filings")
 
+        # Log filing breakdown
+        stats_str = ", ".join(f"{k}: {v}" for k, v in sorted(filing_stats.items()))
         self.logger.info(
             f"Found {len(symbols_with_filings)} symbols with recent filings "
-            f"out of {len(symbol_to_cik)} checked"
+            f"out of {len(symbol_to_cik)} checked ({stats_str})"
         )
 
-        return symbols_with_filings
+        return symbols_with_filings, filing_stats
 
     def update_daily_ticks(
         self,
@@ -835,6 +834,17 @@ class DailyUpdateApp:
         self.logger.info(f"Starting daily update for {target_date}")
         self.logger.info(f"=" * 80)
 
+        # Update SecurityMaster from SEC (extend end_dates for active securities)
+        self.logger.info("Updating SecurityMaster from SEC...")
+        sm_stats = self.security_master.update_from_sec(
+            s3_client=self.s3_client,
+            bucket_name='us-equity-datalake'
+        )
+        self.logger.info(
+            f"SecurityMaster: {sm_stats['extended']} extended, "
+            f"{sm_stats['added']} added, {sm_stats['unchanged']} unchanged"
+        )
+
         # Get current universe
         year = target_date.year
         symbols = self._get_symbols_for_year(year)
@@ -862,7 +872,7 @@ class DailyUpdateApp:
         if update_fundamentals:
             self.logger.info("Checking EDGAR for recent filings...")
 
-            symbols_with_filings = self.get_symbols_with_recent_filings(
+            symbols_with_filings, filing_stats = self.get_symbols_with_recent_filings(
                 symbols=symbols,
                 update_date=target_date,
                 lookback_days=fundamental_lookback_days

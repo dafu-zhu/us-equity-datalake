@@ -565,18 +565,19 @@ class TestDailyUpdateAppNoWRDSGetSymbolsWithRecentFilings:
         # Mock _check_filing to simulate different results
         def mock_check_filing(symbol, cik, lookback_days, semaphore):
             if symbol == 'AAPL':
-                return {'symbol': symbol, 'cik': cik, 'has_recent_filing': True}
-            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': False}
+                return {'symbol': symbol, 'cik': cik, 'has_recent_filing': True, 'filing_types': ['10-K']}
+            return {'symbol': symbol, 'cik': cik, 'has_recent_filing': False, 'filing_types': []}
 
         app._check_filing = mock_check_filing
 
         symbols = ['AAPL', 'MSFT', 'GOOGL']
         update_date = dt.date(2025, 1, 12)
 
-        result = app.get_symbols_with_recent_filings(symbols, update_date, lookback_days=7)
+        result, filing_stats = app.get_symbols_with_recent_filings(symbols, update_date, lookback_days=7)
 
         # Only AAPL should be returned
         assert result == {'AAPL'}
+        assert filing_stats == {'10-K': 1}
 
     @patch('quantdl.update.app_no_wrds.TradingCalendar')
     @patch('quantdl.update.app_no_wrds.SecurityMaster')
@@ -602,16 +603,18 @@ class TestDailyUpdateAppNoWRDSGetSymbolsWithRecentFilings:
         app._check_filing = Mock(return_value={
             'symbol': 'AAPL',
             'cik': '0000320193',
-            'has_recent_filing': False
+            'has_recent_filing': False,
+            'filing_types': []
         })
 
         symbols = ['AAPL', 'UNKNOWN', 'MSFT']
         update_date = dt.date(2025, 1, 12)
 
-        result = app.get_symbols_with_recent_filings(symbols, update_date, lookback_days=7)
+        result, filing_stats = app.get_symbols_with_recent_filings(symbols, update_date, lookback_days=7)
 
         # _check_filing should only be called for symbols with CIKs
         assert app._check_filing.call_count == 2  # AAPL and MSFT only
+        assert filing_stats == {}
 
 
 class TestDailyUpdateAppNoWRDSUpdateDailyTicks:
@@ -989,17 +992,19 @@ class TestDailyUpdateAppNoWRDSRunDailyUpdate:
         app = DailyUpdateAppNoWRDS()
 
         # Mock all dependencies
+        app.security_master.update_from_sec = Mock(return_value={'extended': 0, 'added': 0, 'unchanged': 100})
         app._get_symbols = Mock(return_value=['AAPL', 'MSFT'])
         app.check_market_open = Mock(return_value=True)
         app.update_daily_ticks = Mock(return_value={'success': 2, 'failed': 0, 'skipped': 0})
         app.update_minute_ticks = Mock(return_value={'success': 2, 'failed': 0, 'skipped': 0})
-        app.get_symbols_with_recent_filings = Mock(return_value={'AAPL'})
+        app.get_symbols_with_recent_filings = Mock(return_value=({'AAPL'}, {'10-K': 1}))
         app.update_fundamental = Mock(return_value={'success': 1, 'failed': 0, 'skipped': 0})
 
         target_date = dt.date(2025, 1, 10)
         app.run_daily_update(target_date=target_date, update_ticks=True, update_fundamentals=True)
 
         # Verify all steps were called
+        app.security_master.update_from_sec.assert_called_once()
         app.check_market_open.assert_called_once_with(target_date)
         app.update_daily_ticks.assert_called_once()
         app.update_minute_ticks.assert_called_once()
@@ -1020,11 +1025,12 @@ class TestDailyUpdateAppNoWRDSRunDailyUpdate:
 
         app = DailyUpdateAppNoWRDS()
 
+        app.security_master.update_from_sec = Mock(return_value={'extended': 0, 'added': 0, 'unchanged': 100})
         app._get_symbols = Mock(return_value=['AAPL', 'MSFT'])
         app.check_market_open = Mock(return_value=False)
         app.update_daily_ticks = Mock()
         app.update_minute_ticks = Mock()
-        app.get_symbols_with_recent_filings = Mock(return_value=set())
+        app.get_symbols_with_recent_filings = Mock(return_value=(set(), {}))
         app.update_fundamental = Mock()
 
         target_date = dt.date(2025, 1, 11)  # Weekend
@@ -1051,6 +1057,7 @@ class TestDailyUpdateAppNoWRDSRunDailyUpdate:
 
         app = DailyUpdateAppNoWRDS()
 
+        app.security_master.update_from_sec = Mock(return_value={'extended': 0, 'added': 0, 'unchanged': 100})
         app._get_symbols = Mock(return_value=['AAPL'])
         app.check_market_open = Mock(return_value=True)
         app.update_daily_ticks = Mock(return_value={'success': 1, 'failed': 0, 'skipped': 0})
@@ -1089,9 +1096,10 @@ class TestDailyUpdateAppNoWRDSRunDailyUpdate:
 
         app = DailyUpdateAppNoWRDS()
 
+        app.security_master.update_from_sec = Mock(return_value={'extended': 0, 'added': 0, 'unchanged': 100})
         app._get_symbols = Mock(return_value=[])
         app.check_market_open = Mock(return_value=False)
-        app.get_symbols_with_recent_filings = Mock(return_value=set())
+        app.get_symbols_with_recent_filings = Mock(return_value=(set(), {}))
 
         # Mock date and timedelta properly
         today = dt.date(2025, 1, 12)
@@ -1121,11 +1129,12 @@ class TestDailyUpdateAppNoWRDSRunDailyUpdate:
 
         app = DailyUpdateAppNoWRDS()
 
+        app.security_master.update_from_sec = Mock(return_value={'extended': 0, 'added': 0, 'unchanged': 100})
         app._get_symbols = Mock(return_value=['AAPL', 'MSFT'])
         app.check_market_open = Mock(return_value=True)
         app.update_daily_ticks = Mock(return_value={'success': 2, 'failed': 0, 'skipped': 0})
         app.update_minute_ticks = Mock(return_value={'success': 2, 'failed': 0, 'skipped': 0})
-        app.get_symbols_with_recent_filings = Mock(return_value=set())  # Empty set
+        app.get_symbols_with_recent_filings = Mock(return_value=(set(), {}))  # Empty set
         app.update_fundamental = Mock()
 
         target_date = dt.date(2025, 1, 10)
