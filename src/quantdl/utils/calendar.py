@@ -8,6 +8,8 @@ import datetime as dt
 from pathlib import Path
 from typing import List
 import polars as pl
+import os
+import requests
 
 
 class TradingCalendar:
@@ -22,6 +24,10 @@ class TradingCalendar:
         :param calendar_path: Path to master calendar parquet file
         """
         self.calendar_path = calendar_path
+
+        # Auto-generate calendar if missing
+        if not self.calendar_path.exists():
+            self._generate_calendar()
 
     def load_trading_days(self, year: int, month: int) -> List[str]:
         """
@@ -82,3 +88,43 @@ class TradingCalendar:
         )
 
         return len(df) > 0
+
+    def _generate_calendar(self) -> None:
+        """
+        Generate trading calendar from Alpaca API if not exists.
+        Covers 2009-2029 (20 years).
+        """
+        self.calendar_path.parent.mkdir(parents=True, exist_ok=True)
+
+        alpaca_key = os.getenv("ALPACA_API_KEY")
+        alpaca_secret = os.getenv("ALPACA_API_SECRET")
+
+        if not alpaca_key or not alpaca_secret:
+            raise RuntimeError(
+                "ALPACA_API_KEY and ALPACA_API_SECRET required to generate calendar. "
+                "Set these environment variables or provide calendar file at "
+                f"{self.calendar_path}"
+            )
+
+        url = "https://paper-api.alpaca.markets/v2/calendar"
+        headers = {
+            "accept": "application/json",
+            "APCA-API-KEY-ID": alpaca_key,
+            "APCA-API-SECRET-KEY": alpaca_secret
+        }
+        params = {
+            "start": "2009-01-01T00:00:00Z",
+            "end": "2029-12-31T00:00:00Z",
+            "date_type": "TRADING"
+        }
+
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+
+        date_list = [
+            dt.datetime.strptime(item['date'], '%Y-%m-%d').date()
+            for item in response.json()
+        ]
+
+        df = pl.DataFrame({'timestamp': date_list})
+        df.write_parquet(self.calendar_path)

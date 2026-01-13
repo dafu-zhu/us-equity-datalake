@@ -47,6 +47,10 @@ class TestTradingCalendar:
     def test_initialization_custom_path(self, tmp_path):
         """Test TradingCalendar initialization with custom path"""
         custom_path = tmp_path / "custom_calendar.parquet"
+        # Create empty calendar to prevent auto-generation
+        df = pl.DataFrame({"timestamp": []})
+        df.write_parquet(custom_path)
+
         calendar = TradingCalendar(calendar_path=custom_path)
         assert calendar.calendar_path == custom_path
 
@@ -136,3 +140,45 @@ class TestTradingCalendar:
             assert day[7] == '-'
             # Verify it's a valid date
             dt.datetime.strptime(day, '%Y-%m-%d')
+
+    @patch('quantdl.utils.calendar.requests.get')
+    @patch('quantdl.utils.calendar.os.getenv')
+    def test_auto_generate_calendar(self, mock_getenv, mock_requests_get, tmp_path):
+        """Test calendar auto-generation when file missing"""
+        # Mock Alpaca credentials
+        mock_getenv.side_effect = lambda key: {
+            'ALPACA_API_KEY': 'test_key',
+            'ALPACA_API_SECRET': 'test_secret'
+        }.get(key)
+
+        # Mock Alpaca API response
+        mock_response = Mock()
+        mock_response.json.return_value = [
+            {'date': '2024-01-02'},
+            {'date': '2024-01-03'},
+        ]
+        mock_requests_get.return_value = mock_response
+
+        # Create calendar with non-existent path
+        calendar_path = tmp_path / "auto_generated.parquet"
+        calendar = TradingCalendar(calendar_path=calendar_path)
+
+        # Verify calendar file was created
+        assert calendar_path.exists()
+
+        # Verify API was called correctly
+        mock_requests_get.assert_called_once()
+        call_args = mock_requests_get.call_args
+        assert call_args[1]['params']['start'] == "2009-01-01T00:00:00Z"
+        assert call_args[1]['params']['end'] == "2029-12-31T00:00:00Z"
+
+    @patch('quantdl.utils.calendar.os.getenv')
+    def test_auto_generate_missing_credentials(self, mock_getenv, tmp_path):
+        """Test auto-generation fails gracefully without credentials"""
+        # Mock missing credentials
+        mock_getenv.return_value = None
+
+        calendar_path = tmp_path / "missing_creds.parquet"
+
+        with pytest.raises(RuntimeError, match="ALPACA_API_KEY and ALPACA_API_SECRET required"):
+            TradingCalendar(calendar_path=calendar_path)
