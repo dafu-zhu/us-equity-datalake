@@ -8,6 +8,7 @@ import polars as pl
 import pandas as pd
 import datetime as dt
 import os
+import io
 from quantdl.master.security_master import SymbolNormalizer, SecurityMaster
 
 
@@ -1069,3 +1070,481 @@ class TestSecurityMasterClose:
         sm.close()
 
         sm.db.close.assert_called_once()
+
+
+class TestSecurityMasterS3Operations:
+    """Test SecurityMaster S3 loading and export functionality"""
+
+    @patch('quantdl.master.security_master.setup_logger')
+    def test_load_from_s3_success(self, mock_logger):
+        """Test successful S3 load with valid metadata"""
+        import io
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        # Create mock S3 client and response
+        mock_s3 = Mock()
+
+        # Create test data with metadata
+        test_df = pl.DataFrame({
+            'security_id': [101],
+            'symbol': ['AAPL'],
+            'company': ['Apple Inc'],
+            'cik': ['0000320193'],
+            'cusip': ['037833100'],
+            'start_date': [dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2020, 12, 31)]
+        })
+
+        # Convert to Arrow and add metadata
+        table = test_df.to_arrow()
+        metadata = {
+            b'crsp_end_date': b'2024-12-31',
+            b'export_timestamp': b'2024-01-01T00:00:00',
+            b'version': b'1.0',
+            b'row_count': b'1'
+        }
+        table = table.replace_schema_metadata(metadata)
+
+        # Write to buffer
+        buffer = io.BytesIO()
+        pq.write_table(table, buffer)
+        buffer.seek(0)
+
+        # Mock S3 response
+        mock_s3.get_object.return_value = {
+            'Body': Mock(read=Mock(return_value=buffer.read()))
+        }
+
+        # Test load
+        result_df, result_metadata = sm._load_from_s3(mock_s3, 'test-bucket', 'test-key')
+
+        # Verify
+        assert len(result_df) == 1
+        assert result_metadata['crsp_end_date'] == '2024-12-31'
+        assert result_metadata['version'] == '1.0'
+        mock_s3.get_object.assert_called_once_with(Bucket='test-bucket', Key='test-key')
+
+    @patch('quantdl.master.security_master.setup_logger')
+    def test_load_from_s3_no_metadata(self, mock_logger):
+        """Test S3 load when metadata is missing"""
+        import io
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        mock_s3 = Mock()
+
+        # Create test data without metadata
+        test_df = pl.DataFrame({
+            'security_id': [101],
+            'symbol': ['AAPL'],
+            'company': ['Apple Inc'],
+            'cik': ['0000320193'],
+            'cusip': ['037833100'],
+            'start_date': [dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2020, 12, 31)]
+        })
+
+        table = test_df.to_arrow()
+        buffer = io.BytesIO()
+        pq.write_table(table, buffer)
+        buffer.seek(0)
+
+        mock_s3.get_object.return_value = {
+            'Body': Mock(read=Mock(return_value=buffer.read()))
+        }
+
+        result_df, result_metadata = sm._load_from_s3(mock_s3, 'test-bucket', 'test-key')
+
+        assert len(result_df) == 1
+        assert result_metadata == {}
+
+    @patch('quantdl.master.security_master.setup_logger')
+    def test_load_from_s3_failure(self, mock_logger):
+        """Test S3 load failure raises exception"""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        mock_s3 = Mock()
+        mock_s3.get_object.side_effect = Exception("S3 error")
+
+        with pytest.raises(Exception, match="S3 error"):
+            sm._load_from_s3(mock_s3, 'test-bucket', 'test-key')
+
+    @patch('quantdl.master.security_master.setup_logger')
+    def test_export_to_s3_success(self, mock_logger):
+        """Test successful export to S3 with metadata"""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+        sm.CRSP_LATEST_DATE = '2024-12-31'
+
+        # Create test master_tb
+        sm.master_tb = pl.DataFrame({
+            'security_id': [101, 102],
+            'symbol': ['AAPL', 'MSFT'],
+            'company': ['Apple Inc', 'Microsoft'],
+            'cik': ['0000320193', '0000789019'],
+            'cusip': ['037833100', '594918104'],
+            'start_date': [dt.date(2020, 1, 1), dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2020, 12, 31), dt.date(2020, 12, 31)]
+        })
+
+        mock_s3 = Mock()
+
+        result = sm.export_to_s3(mock_s3, 'test-bucket', 'test-key')
+
+        # Verify upload was called
+        mock_s3.upload_fileobj.assert_called_once()
+        call_args = mock_s3.upload_fileobj.call_args
+
+        # Verify bucket and key
+        assert call_args[0][1] == 'test-bucket'
+        assert call_args[0][2] == 'test-key'
+
+        # Verify result
+        assert result['status'] == 'success'
+        assert 'export_timestamp' in result
+
+    @patch('quantdl.master.security_master.setup_logger')
+    def test_export_to_s3_includes_metadata(self, mock_logger):
+        """Test export includes correct metadata in Parquet file"""
+        import io
+        import pyarrow.parquet as pq
+
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+        sm.CRSP_LATEST_DATE = '2024-12-31'
+
+        sm.master_tb = pl.DataFrame({
+            'security_id': [101],
+            'symbol': ['AAPL'],
+            'company': ['Apple Inc'],
+            'cik': ['0000320193'],
+            'cusip': ['037833100'],
+            'start_date': [dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2020, 12, 31)]
+        })
+
+        # Capture uploaded data
+        uploaded_buffer = None
+        def capture_upload(buffer, bucket, key):
+            nonlocal uploaded_buffer
+            uploaded_buffer = io.BytesIO(buffer.read())
+
+        mock_s3 = Mock()
+        mock_s3.upload_fileobj.side_effect = capture_upload
+
+        sm.export_to_s3(mock_s3, 'test-bucket', 'test-key')
+
+        # Read back and verify metadata
+        uploaded_buffer.seek(0)
+        table = pq.read_table(uploaded_buffer)
+
+        assert table.schema.metadata is not None
+        assert b'crsp_end_date' in table.schema.metadata
+        assert table.schema.metadata[b'crsp_end_date'] == b'2024-12-31'
+        assert b'version' in table.schema.metadata
+        assert table.schema.metadata[b'version'] == b'1.0'
+        assert b'row_count' in table.schema.metadata
+        assert table.schema.metadata[b'row_count'] == b'1'
+
+    @patch('quantdl.master.security_master.setup_logger')
+    @patch('quantdl.master.security_master.raw_sql_with_retry')
+    def test_init_s3_fast_path_success(self, mock_sql, mock_logger):
+        """Test initialization with S3 fast path (lines 212-230)"""
+        import io
+        import pyarrow.parquet as pq
+
+        # Create test data with valid metadata
+        test_df = pl.DataFrame({
+            'security_id': [101],
+            'symbol': ['AAPL'],
+            'company': ['Apple Inc'],
+            'cik': ['0000320193'],
+            'cusip': ['037833100'],
+            'start_date': [dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2020, 12, 31)]
+        })
+
+        table = test_df.to_arrow()
+        metadata = {
+            b'crsp_end_date': b'2024-12-31',
+            b'export_timestamp': b'2024-01-01T00:00:00',
+            b'version': b'1.0',
+            b'row_count': b'1'
+        }
+        table = table.replace_schema_metadata(metadata)
+
+        buffer = io.BytesIO()
+        pq.write_table(table, buffer)
+        buffer.seek(0)
+
+        mock_s3 = Mock()
+        mock_s3.get_object.return_value = {
+            'Body': Mock(read=Mock(return_value=buffer.read()))
+        }
+
+        # Initialize with S3 client
+        sm = SecurityMaster(
+            db=None,
+            s3_client=mock_s3,
+            bucket_name='test-bucket',
+            s3_key='test-key',
+            force_rebuild=False
+        )
+
+        # Verify S3 was used (fast path)
+        assert sm._from_s3 is True
+        assert len(sm.master_tb) == 1
+        assert sm.cik_cusip is None  # Not needed when loaded from S3
+        mock_s3.get_object.assert_called_once()
+        mock_sql.assert_not_called()  # Should not query WRDS
+
+    @patch('quantdl.master.security_master.setup_logger')
+    @patch('quantdl.master.security_master.raw_sql_with_retry')
+    def test_init_s3_stale_metadata_fallback(self, mock_sql, mock_logger):
+        """Test initialization falls back to WRDS when S3 metadata is stale (lines 216-221)"""
+        import io
+        import pyarrow.parquet as pq
+
+        # Create test data with STALE metadata
+        test_df = pl.DataFrame({
+            'security_id': [101],
+            'symbol': ['AAPL'],
+            'company': ['Apple Inc'],
+            'cik': ['0000320193'],
+            'cusip': ['037833100'],
+            'start_date': [dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2020, 12, 31)]
+        })
+
+        table = test_df.to_arrow()
+        metadata = {
+            b'crsp_end_date': b'2023-12-31',  # Stale date!
+            b'version': b'1.0'
+        }
+        table = table.replace_schema_metadata(metadata)
+
+        buffer = io.BytesIO()
+        pq.write_table(table, buffer)
+        buffer.seek(0)
+
+        mock_s3 = Mock()
+        mock_s3.get_object.return_value = {
+            'Body': Mock(read=Mock(return_value=buffer.read()))
+        }
+
+        # Mock WRDS data
+        mock_db = Mock()
+        mock_sql.return_value = pd.DataFrame({
+            'kypermno': [1],
+            'ticker': ['AAPL'],
+            'tsymbol': ['AAPL'],
+            'comnam': ['Apple Inc'],
+            'ncusip': ['037833100'],
+            'cik': ['0000320193'],
+            'cikdate1': [pd.Timestamp('2020-01-01')],
+            'cikdate2': [pd.Timestamp('2024-12-31')],
+            'namedt': [pd.Timestamp('2020-01-01')],
+            'nameenddt': [pd.Timestamp('2024-12-31')]
+        })
+
+        # Initialize with S3 client (should fallback to WRDS)
+        sm = SecurityMaster(
+            db=mock_db,
+            s3_client=mock_s3,
+            bucket_name='test-bucket',
+            s3_key='test-key',
+            force_rebuild=False
+        )
+
+        # Verify fallback to WRDS occurred
+        assert sm._from_s3 is False
+        mock_sql.assert_called()  # Should query WRDS
+        assert sm.cik_cusip is not None  # Built from WRDS
+
+    @patch('quantdl.master.security_master.setup_logger')
+    @patch('quantdl.master.security_master.raw_sql_with_retry')
+    def test_init_s3_load_failure_fallback(self, mock_sql, mock_logger):
+        """Test initialization falls back to WRDS when S3 load fails (lines 232-233)"""
+        mock_s3 = Mock()
+        mock_s3.get_object.side_effect = Exception("S3 connection error")
+
+        # Mock WRDS data
+        mock_db = Mock()
+        mock_sql.return_value = pd.DataFrame({
+            'kypermno': [1],
+            'ticker': ['AAPL'],
+            'tsymbol': ['AAPL'],
+            'comnam': ['Apple Inc'],
+            'ncusip': ['037833100'],
+            'cik': ['0000320193'],
+            'cikdate1': [pd.Timestamp('2020-01-01')],
+            'cikdate2': [pd.Timestamp('2024-12-31')],
+            'namedt': [pd.Timestamp('2020-01-01')],
+            'nameenddt': [pd.Timestamp('2024-12-31')]
+        })
+
+        # Initialize with S3 client (should fallback to WRDS)
+        sm = SecurityMaster(
+            db=mock_db,
+            s3_client=mock_s3,
+            bucket_name='test-bucket',
+            s3_key='test-key',
+            force_rebuild=False
+        )
+
+        # Verify fallback occurred
+        assert sm._from_s3 is False
+        mock_sql.assert_called()
+
+    @patch('quantdl.master.security_master.wrds.Connection')
+    @patch('quantdl.master.security_master.setup_logger')
+    @patch.dict(os.environ, {}, clear=True)  # Clear env vars
+    def test_init_missing_wrds_credentials_no_s3(self, mock_logger, mock_wrds):
+        """Test initialization raises ValueError when WRDS credentials missing (line 240)"""
+        with pytest.raises(ValueError, match="WRDS credentials not found"):
+            SecurityMaster(db=None, s3_client=None, force_rebuild=False)
+
+    @patch('quantdl.master.security_master.setup_logger')
+    @patch('quantdl.master.security_master.raw_sql_with_retry')
+    def test_init_auto_export_to_s3_after_wrds_build(self, mock_sql, mock_logger):
+        """Test auto-export to S3 after building from WRDS (lines 258-262)"""
+        mock_db = Mock()
+        mock_sql.return_value = pd.DataFrame({
+            'kypermno': [1],
+            'ticker': ['AAPL'],
+            'tsymbol': ['AAPL'],
+            'comnam': ['Apple Inc'],
+            'ncusip': ['037833100'],
+            'cik': ['0000320193'],
+            'cikdate1': [pd.Timestamp('2020-01-01')],
+            'cikdate2': [pd.Timestamp('2024-12-31')],
+            'namedt': [pd.Timestamp('2020-01-01')],
+            'nameenddt': [pd.Timestamp('2024-12-31')]
+        })
+
+        mock_s3 = Mock()
+
+        # Initialize WITHOUT S3 data (build from WRDS)
+        sm = SecurityMaster(
+            db=mock_db,
+            s3_client=mock_s3,
+            bucket_name='test-bucket',
+            s3_key='test-key',
+            force_rebuild=True  # Force rebuild from WRDS
+        )
+
+        # Verify auto-export was called
+        mock_s3.upload_fileobj.assert_called_once()
+        call_args = mock_s3.upload_fileobj.call_args
+        assert call_args[0][1] == 'test-bucket'
+        assert call_args[0][2] == 'test-key'
+
+    @patch('quantdl.master.security_master.setup_logger')
+    @patch('quantdl.master.security_master.raw_sql_with_retry')
+    def test_init_auto_export_failure_logged(self, mock_sql, mock_logger):
+        """Test auto-export failure is logged as warning (line 262)"""
+        mock_db = Mock()
+        mock_sql.return_value = pd.DataFrame({
+            'kypermno': [1],
+            'ticker': ['AAPL'],
+            'tsymbol': ['AAPL'],
+            'comnam': ['Apple Inc'],
+            'ncusip': ['037833100'],
+            'cik': ['0000320193'],
+            'cikdate1': [pd.Timestamp('2020-01-01')],
+            'cikdate2': [pd.Timestamp('2024-12-31')],
+            'namedt': [pd.Timestamp('2020-01-01')],
+            'nameenddt': [pd.Timestamp('2024-12-31')]
+        })
+
+        mock_s3 = Mock()
+        mock_s3.upload_fileobj.side_effect = Exception("Upload failed")
+
+        # Initialize - should not raise, only log warning
+        sm = SecurityMaster(
+            db=mock_db,
+            s3_client=mock_s3,
+            bucket_name='test-bucket',
+            s3_key='test-key',
+            force_rebuild=True
+        )
+
+        # Verify warning was logged (check via logger mock)
+        # Note: We're verifying it doesn't crash, logging check requires logger fixture
+        assert sm._from_s3 is False
+        assert sm.master_tb is not None
+
+    @patch('quantdl.master.security_master.setup_logger')
+    @patch('quantdl.master.security_master.raw_sql_with_retry')
+    def test_init_force_rebuild_skips_s3(self, mock_sql, mock_logger):
+        """Test force_rebuild=True skips S3 loading"""
+        mock_db = Mock()
+        mock_sql.return_value = pd.DataFrame({
+            'kypermno': [1],
+            'ticker': ['AAPL'],
+            'tsymbol': ['AAPL'],
+            'comnam': ['Apple Inc'],
+            'ncusip': ['037833100'],
+            'cik': ['0000320193'],
+            'cikdate1': [pd.Timestamp('2020-01-01')],
+            'cikdate2': [pd.Timestamp('2024-12-31')],
+            'namedt': [pd.Timestamp('2020-01-01')],
+            'nameenddt': [pd.Timestamp('2024-12-31')]
+        })
+
+        mock_s3 = Mock()
+
+        # Initialize with force_rebuild
+        sm = SecurityMaster(
+            db=mock_db,
+            s3_client=mock_s3,
+            force_rebuild=True  # Should skip S3
+        )
+
+        # Verify S3 get_object was NOT called
+        mock_s3.get_object.assert_not_called()
+        assert sm._from_s3 is False
+        mock_sql.assert_called()  # Built from WRDS
+
+    @patch('quantdl.master.security_master.setup_logger')
+    def test_export_to_s3_preserves_row_count_in_metadata(self, mock_logger):
+        """Test export includes correct row count in metadata"""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+        sm.CRSP_LATEST_DATE = '2024-12-31'
+
+        # Create larger dataset
+        sm.master_tb = pl.DataFrame({
+            'security_id': list(range(1, 101)),
+            'symbol': [f'SYM{i:03d}' for i in range(1, 101)],
+            'company': [f'Company {i}' for i in range(1, 101)],
+            'cik': [f'{i:010d}' for i in range(1, 101)],
+            'cusip': [f'{i:08d}' for i in range(1, 101)],
+            'start_date': [dt.date(2020, 1, 1)] * 100,
+            'end_date': [dt.date(2020, 12, 31)] * 100
+        })
+
+        # Capture uploaded data
+        uploaded_buffer = None
+        def capture_upload(buffer, bucket, key):
+            nonlocal uploaded_buffer
+            uploaded_buffer = io.BytesIO(buffer.read())
+
+        mock_s3 = Mock()
+        mock_s3.upload_fileobj.side_effect = capture_upload
+
+        result = sm.export_to_s3(mock_s3, 'test-bucket', 'test-key')
+
+        # Verify row count in metadata
+        import pyarrow.parquet as pq
+        uploaded_buffer.seek(0)
+        table = pq.read_table(uploaded_buffer)
+        assert table.schema.metadata[b'row_count'] == b'100'

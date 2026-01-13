@@ -623,3 +623,279 @@ class TestUniverseManagerEdgeCases:
 
         # Only GOOD should be in the result
         assert result == ["GOOD"]
+
+    @patch('quantdl.universe.manager.Ticks')
+    @patch('quantdl.universe.manager.setup_logger')
+    def test_initialization_s3_only_security_master(self, mock_logger, mock_ticks_class):
+        """Test initialization with S3-only SecurityMaster (no WRDS connection)"""
+        # Create SecurityMaster without db attribute (S3-only mode)
+        mock_sm = Mock(spec=['some_method'])  # No db attribute
+
+        manager = UniverseManager(security_master=mock_sm)
+
+        # Verify CRSP fetcher is None in S3-only mode
+        assert manager.crsp_fetcher is None
+        assert manager.security_master == mock_sm
+        assert manager._owns_wrds_conn is False
+
+        # Verify log message was recorded
+        manager.logger.info.assert_called_with(
+            "UniverseManager initialized without CRSP fetcher (S3-only mode). "
+            "Historical universe queries (<2025) will fail."
+        )
+
+    @patch('quantdl.universe.manager.Ticks')
+    @patch('quantdl.universe.manager.CRSPDailyTicks')
+    @patch('quantdl.universe.manager.setup_logger')
+    @patch('quantdl.universe.manager.get_hist_universe_nasdaq')
+    def test_load_symbols_historical_cache_hit(self, mock_get_hist, mock_logger, mock_crsp_class, mock_ticks_class):
+        """Test load_symbols_for_year returns cached result for historical years"""
+        mock_crsp = Mock()
+        mock_crsp.conn = Mock()
+        mock_crsp._conn = Mock()
+        mock_crsp_class.return_value = mock_crsp
+
+        manager = UniverseManager()
+
+        # Pre-populate cache
+        manager._historical_cache[(2023, "alpaca")] = ["CACHED1", "CACHED2", "CACHED3"]
+
+        # Call load_symbols_for_year
+        symbols = manager.load_symbols_for_year(year=2023, sym_type="alpaca")
+
+        # Verify cache was used and DB query was NOT made
+        assert symbols == ["CACHED1", "CACHED2", "CACHED3"]
+        mock_get_hist.assert_not_called()
+        manager.logger.info.assert_any_call(
+            "Loaded 3 symbols for 2023 from cache (format=alpaca)"
+        )
+
+    @patch('quantdl.universe.manager.Ticks')
+    @patch('quantdl.universe.manager.setup_logger')
+    def test_load_symbols_historical_no_crsp_fetcher(self, mock_logger, mock_ticks_class):
+        """Test load_symbols_for_year returns empty list when CRSP fetcher is None"""
+        # Create SecurityMaster without db (S3-only mode)
+        mock_sm = Mock(spec=['some_method'])
+        mock_logger_instance = Mock()
+        mock_logger.return_value = mock_logger_instance
+
+        manager = UniverseManager(security_master=mock_sm)
+
+        # Verify CRSP fetcher is None
+        assert manager.crsp_fetcher is None
+
+        # Try to load historical symbols (year < 2025)
+        symbols = manager.load_symbols_for_year(year=2023, sym_type="alpaca")
+
+        # Verify empty list returned and error logged
+        assert symbols == []
+        # Check that error was logged with RuntimeError message
+        error_calls = [call for call in manager.logger.error.call_args_list
+                      if "Cannot load symbols for year 2023" in str(call)]
+        assert len(error_calls) > 0
+
+    @patch('quantdl.universe.manager.Ticks')
+    @patch('quantdl.universe.manager.CRSPDailyTicks')
+    @patch('quantdl.universe.manager.setup_logger')
+    def test_load_symbols_historical_crsp_conn_none(self, mock_logger, mock_crsp_class, mock_ticks_class):
+        """Test load_symbols_for_year returns empty list when CRSP connection is None"""
+        mock_crsp = Mock()
+        mock_crsp.conn = None
+        mock_crsp._conn = None  # Both should be None
+        mock_crsp_class.return_value = mock_crsp
+
+        manager = UniverseManager()
+
+        # Try to load historical symbols (year < 2025)
+        symbols = manager.load_symbols_for_year(year=2022, sym_type="alpaca")
+
+        # Verify empty list returned and error logged
+        assert symbols == []
+        # Check that error was logged with RuntimeError message
+        error_calls = [call for call in manager.logger.error.call_args_list
+                      if "Cannot load symbols for year 2022" in str(call)]
+        assert len(error_calls) > 0
+
+    @patch('quantdl.universe.manager.Ticks')
+    @patch('quantdl.universe.manager.CRSPDailyTicks')
+    @patch('quantdl.universe.manager.setup_logger')
+    @patch('quantdl.universe.manager.get_hist_universe_nasdaq')
+    @patch('os.getenv')
+    def test_load_symbols_operational_error_stale_connection_owned(
+        self, mock_getenv, mock_get_hist, mock_logger, mock_crsp_class, mock_ticks_class
+    ):
+        """Test load_symbols_for_year handles stale connection retry logic"""
+        # Setup environment variables
+        mock_getenv.side_effect = lambda key: {
+            'WRDS_USERNAME': 'test_user',
+            'WRDS_PASSWORD': 'test_pass'
+        }.get(key)
+
+        # Create mock CRSP fetcher with stale connection
+        mock_crsp = Mock()
+        mock_old_conn = Mock()
+        mock_new_conn = Mock()
+        mock_crsp.conn = mock_old_conn
+        mock_crsp._conn = mock_old_conn
+        mock_crsp_class.return_value = mock_crsp
+
+        # First call raises OperationalError, second succeeds
+        from sqlalchemy.exc import OperationalError
+        mock_df = pl.DataFrame({'Ticker': ['AAPL', 'MSFT']})
+
+        # Create an OperationalError with proper message
+        error = OperationalError("statement", "params", "orig")
+        error.args = ("server closed the connection",)
+
+        call_count = 0
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise error
+            return mock_df
+
+        mock_get_hist.side_effect = side_effect
+
+        # Mock wrds module in sys.modules before calling function
+        mock_wrds_module = Mock()
+        mock_wrds_module.Connection.return_value = mock_new_conn
+
+        with patch.dict('sys.modules', {'wrds': mock_wrds_module}):
+            # Create manager that owns the connection
+            manager = UniverseManager()
+            assert manager._owns_wrds_conn is True
+
+            # Call load_symbols_for_year
+            symbols = manager.load_symbols_for_year(year=2023, sym_type="alpaca")
+
+            # Verify connection was recreated
+            mock_wrds_module.Connection.assert_called_once_with(
+                wrds_username='test_user',
+                wrds_password='test_pass'
+            )
+            assert mock_crsp.conn == mock_new_conn
+
+            # Verify warning was logged
+            assert any("WRDS connection stale" in str(call) for call in manager.logger.warning.call_args_list)
+
+            # Verify query was retried with new connection
+            assert call_count == 2
+            assert symbols == ['AAPL', 'MSFT']
+
+    @patch('quantdl.universe.manager.Ticks')
+    @patch('quantdl.universe.manager.CRSPDailyTicks')
+    @patch('quantdl.universe.manager.setup_logger')
+    @patch('quantdl.universe.manager.get_hist_universe_nasdaq')
+    def test_load_symbols_operational_error_stale_connection_not_owned(
+        self, mock_get_hist, mock_logger, mock_crsp_class, mock_ticks_class
+    ):
+        """Test load_symbols_for_year handles OperationalError when connection not owned"""
+        # Create mock CRSP fetcher
+        mock_crsp = Mock()
+        mock_conn = Mock()
+        mock_crsp.conn = mock_conn
+        mock_crsp._conn = mock_conn
+
+        # First call raises OperationalError
+        from sqlalchemy.exc import OperationalError
+        error = OperationalError("statement", "params", "orig")
+        error.args = ("closed the connection",)
+        mock_get_hist.side_effect = error
+
+        # Create manager with provided CRSP fetcher (doesn't own connection)
+        manager = UniverseManager(crsp_fetcher=mock_crsp)
+        assert manager._owns_wrds_conn is False
+
+        # Call returns empty list (error caught by outer handler)
+        symbols = manager.load_symbols_for_year(year=2023, sym_type="alpaca")
+
+        # Verify empty list and error logged
+        assert symbols == []
+        # Error should be logged
+        manager.logger.error.assert_called_once()
+
+    @patch('quantdl.universe.manager.Ticks')
+    @patch('quantdl.universe.manager.CRSPDailyTicks')
+    @patch('quantdl.universe.manager.setup_logger')
+    @patch('quantdl.universe.manager.get_hist_universe_nasdaq')
+    def test_load_symbols_operational_error_other_error(
+        self, mock_get_hist, mock_logger, mock_crsp_class, mock_ticks_class
+    ):
+        """Test load_symbols_for_year returns empty list for non-stale OperationalError"""
+        mock_crsp = Mock()
+        mock_crsp.conn = Mock()
+        mock_crsp._conn = Mock()
+        mock_crsp_class.return_value = mock_crsp
+
+        # OperationalError with different message (not stale connection)
+        from sqlalchemy.exc import OperationalError
+        mock_get_hist.side_effect = OperationalError(
+            "statement", "params", "orig", "some other database error"
+        )
+
+        manager = UniverseManager()
+
+        # Should return empty list (error caught by outer handler)
+        symbols = manager.load_symbols_for_year(year=2023, sym_type="alpaca")
+
+        assert symbols == []
+        # Should not log stale connection warning
+        manager.logger.warning.assert_not_called()
+        # Error should be logged
+        manager.logger.error.assert_called_once()
+
+    @patch('quantdl.universe.manager.Ticks')
+    @patch('quantdl.universe.manager.CRSPDailyTicks')
+    @patch('quantdl.universe.manager.setup_logger')
+    @patch('quantdl.universe.manager.get_hist_universe_nasdaq')
+    @patch('os.getenv')
+    def test_load_symbols_operational_error_close_fails(
+        self, mock_getenv, mock_get_hist, mock_logger, mock_crsp_class, mock_ticks_class
+    ):
+        """Test load_symbols_for_year handles close() failure gracefully"""
+        # Setup environment variables
+        mock_getenv.side_effect = lambda key: {
+            'WRDS_USERNAME': 'test_user',
+            'WRDS_PASSWORD': 'test_pass'
+        }.get(key)
+
+        # Create mock CRSP fetcher
+        mock_crsp = Mock()
+        mock_old_conn = Mock()
+        mock_old_conn.close.side_effect = Exception("close failed")
+        mock_new_conn = Mock()
+        mock_crsp.conn = mock_old_conn
+        mock_crsp._conn = mock_old_conn
+        mock_crsp_class.return_value = mock_crsp
+
+        # First call raises OperationalError, second succeeds
+        from sqlalchemy.exc import OperationalError
+        mock_df = pl.DataFrame({'Ticker': ['AAPL']})
+
+        error = OperationalError("statement", "params", "orig")
+        error.args = ("server closed",)
+
+        call_count = 0
+        def side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise error
+            return mock_df
+
+        mock_get_hist.side_effect = side_effect
+
+        # Mock wrds module in sys.modules
+        mock_wrds_module = Mock()
+        mock_wrds_module.Connection.return_value = mock_new_conn
+
+        with patch.dict('sys.modules', {'wrds': mock_wrds_module}):
+            manager = UniverseManager()
+
+            # Should handle close() failure gracefully and continue
+            symbols = manager.load_symbols_for_year(year=2023, sym_type="alpaca")
+
+            # Verify connection was still recreated despite close failure
+            mock_wrds_module.Connection.assert_called_once()
+            assert symbols == ['AAPL']
