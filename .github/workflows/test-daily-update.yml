@@ -42,6 +42,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
         run: |
+          set -o pipefail
           uv run quantdl-update --no-ticks 2>&1 | tee update.log
 
       - name: Test consolidate_year functionality
