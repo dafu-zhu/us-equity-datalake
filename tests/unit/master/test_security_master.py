@@ -395,11 +395,18 @@ class TestSecurityMaster:
             sm.auto_resolve('ZZZ', '2020-06-15')
 
     def test_sid_to_permno(self):
+        """Test sid_to_permno uses master_tb directly (works when loaded from S3)"""
         sm = SecurityMaster.__new__(SecurityMaster)
-        sm.security_map = Mock(return_value=pl.DataFrame({
-            'security_id': [101],
-            'permno': [555]
-        }))
+        sm.master_tb = pl.DataFrame({
+            'security_id': [101, 102],
+            'permno': [555, 666],
+            'symbol': ['AAA', 'BBB'],
+            'company': ['AAA Corp', 'BBB Corp'],
+            'cik': ['0001', '0002'],
+            'cusip': ['11111111', '22222222'],
+            'start_date': [dt.date(2020, 1, 1), dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2020, 12, 31), dt.date(2020, 12, 31)]
+        })
 
         result = sm.sid_to_permno(101)
 
@@ -701,7 +708,8 @@ class TestSecurityMaster:
         sec_ids = result.select('security_id').unique().to_series().to_list()
         assert len(sec_ids) == 2
 
-    def test_master_table_includes_security_id(self):
+    def test_master_table_includes_security_id_and_permno(self):
+        """Test master_table includes both security_id and permno columns"""
         sm = SecurityMaster.__new__(SecurityMaster)
         sm.cik_cusip = pl.DataFrame({
             'permno': [1],
@@ -726,9 +734,12 @@ class TestSecurityMaster:
         result = sm.master_table()
 
         assert 'security_id' in result.columns
+        assert 'permno' in result.columns
         assert result.select('security_id').item() == 101
+        assert result.select('permno').item() == 1
 
-    def test_master_table_preserves_security_id_with_null_cik(self):
+    def test_master_table_preserves_security_id_and_permno_with_null_cik(self):
+        """Test master_table preserves security_id and permno even with null cik"""
         sm = SecurityMaster.__new__(SecurityMaster)
         sm.cik_cusip = pl.DataFrame({
             'permno': [1],
@@ -753,6 +764,7 @@ class TestSecurityMaster:
         result = sm.master_table()
 
         assert result.select('security_id').item() == 101
+        assert result.select('permno').item() == 1
 
 
 class TestSecurityMasterInitialization:
@@ -1088,9 +1100,10 @@ class TestSecurityMasterS3Operations:
         # Create mock S3 client and response
         mock_s3 = Mock()
 
-        # Create test data with metadata
+        # Create test data with metadata (including permno for sid_to_permno support)
         test_df = pl.DataFrame({
             'security_id': [101],
+            'permno': [555],
             'symbol': ['AAPL'],
             'company': ['Apple Inc'],
             'cik': ['0000320193'],
@@ -1140,9 +1153,10 @@ class TestSecurityMasterS3Operations:
 
         mock_s3 = Mock()
 
-        # Create test data without metadata
+        # Create test data without metadata (including permno)
         test_df = pl.DataFrame({
             'security_id': [101],
+            'permno': [555],
             'symbol': ['AAPL'],
             'company': ['Apple Inc'],
             'cik': ['0000320193'],
@@ -1184,9 +1198,10 @@ class TestSecurityMasterS3Operations:
         sm.logger = Mock()
         sm.CRSP_LATEST_DATE = '2024-12-31'
 
-        # Create test master_tb
+        # Create test master_tb (including permno)
         sm.master_tb = pl.DataFrame({
             'security_id': [101, 102],
+            'permno': [555, 666],
             'symbol': ['AAPL', 'MSFT'],
             'company': ['Apple Inc', 'Microsoft'],
             'cik': ['0000320193', '0000789019'],
@@ -1223,6 +1238,7 @@ class TestSecurityMasterS3Operations:
 
         sm.master_tb = pl.DataFrame({
             'security_id': [101],
+            'permno': [555],
             'symbol': ['AAPL'],
             'company': ['Apple Inc'],
             'cik': ['0000320193'],
@@ -1261,9 +1277,10 @@ class TestSecurityMasterS3Operations:
         import io
         import pyarrow.parquet as pq
 
-        # Create test data with valid metadata
+        # Create test data with valid metadata (including permno)
         test_df = pl.DataFrame({
             'security_id': [101],
+            'permno': [555],
             'symbol': ['AAPL'],
             'company': ['Apple Inc'],
             'cik': ['0000320193'],
@@ -1313,9 +1330,10 @@ class TestSecurityMasterS3Operations:
         import io
         import pyarrow.parquet as pq
 
-        # Create test data with STALE metadata
+        # Create test data with STALE metadata (including permno)
         test_df = pl.DataFrame({
             'security_id': [101],
+            'permno': [555],
             'symbol': ['AAPL'],
             'company': ['Apple Inc'],
             'cik': ['0000320193'],
@@ -1521,9 +1539,10 @@ class TestSecurityMasterS3Operations:
         sm.logger = Mock()
         sm.CRSP_LATEST_DATE = '2024-12-31'
 
-        # Create larger dataset
+        # Create larger dataset (including permno)
         sm.master_tb = pl.DataFrame({
             'security_id': list(range(1, 101)),
+            'permno': list(range(1000, 1100)),
             'symbol': [f'SYM{i:03d}' for i in range(1, 101)],
             'company': [f'Company {i}' for i in range(1, 101)],
             'cik': [f'{i:010d}' for i in range(1, 101)],
@@ -1548,3 +1567,64 @@ class TestSecurityMasterS3Operations:
         uploaded_buffer.seek(0)
         table = pq.read_table(uploaded_buffer)
         assert table.schema.metadata[b'row_count'] == b'100'
+
+    @patch('quantdl.master.security_master.setup_logger')
+    @patch('quantdl.master.security_master.raw_sql_with_retry')
+    def test_sid_to_permno_works_when_loaded_from_s3(self, mock_sql, mock_logger):
+        """Test sid_to_permno works when cik_cusip is None (S3 fast path).
+
+        This tests the bug fix where sid_to_permno called security_map() which
+        required cik_cusip, but cik_cusip was None when loaded from S3.
+        """
+        import io
+        import pyarrow.parquet as pq
+
+        # Create test data WITH permno column (required for sid_to_permno)
+        test_df = pl.DataFrame({
+            'security_id': [101, 102],
+            'permno': [555, 666],
+            'symbol': ['AAPL', 'MSFT'],
+            'company': ['Apple Inc', 'Microsoft'],
+            'cik': ['0000320193', '0000789019'],
+            'cusip': ['037833100', '594918104'],
+            'start_date': [dt.date(2020, 1, 1), dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2020, 12, 31), dt.date(2020, 12, 31)]
+        })
+
+        table = test_df.to_arrow()
+        metadata = {
+            b'crsp_end_date': b'2024-12-31',
+            b'version': b'1.0',
+            b'row_count': b'2'
+        }
+        table = table.replace_schema_metadata(metadata)
+
+        buffer = io.BytesIO()
+        pq.write_table(table, buffer)
+        buffer.seek(0)
+
+        mock_s3 = Mock()
+        mock_s3.get_object.return_value = {
+            'Body': Mock(read=Mock(return_value=buffer.read()))
+        }
+
+        # Initialize from S3 (fast path)
+        sm = SecurityMaster(
+            db=None,
+            s3_client=mock_s3,
+            bucket_name='test-bucket',
+            s3_key='test-key',
+            force_rebuild=False
+        )
+
+        # Verify S3 fast path was used
+        assert sm._from_s3 is True
+        assert sm.cik_cusip is None  # cik_cusip is None when loaded from S3
+
+        # This should work without calling security_map()
+        result = sm.sid_to_permno(101)
+        assert result == 555
+
+        # Verify second lookup works too
+        result2 = sm.sid_to_permno(102)
+        assert result2 == 666

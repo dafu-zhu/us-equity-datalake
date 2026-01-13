@@ -609,12 +609,12 @@ class SecurityMaster:
         """
         Create comprehensive table with security_id as master key, tracking business continuity.
 
-        Schema: (security_id, symbol, company, cik, cusip, start_date, end_date)
+        Schema: (security_id, permno, symbol, company, cik, cusip, start_date, end_date)
         """
         security_map = self.security_map()
 
         result = security_map.select([
-            'security_id', 'symbol', 'company', 'cik', 'cusip', 'start_date', 'end_date'
+            'security_id', 'permno', 'symbol', 'company', 'cik', 'cusip', 'start_date', 'end_date'
         ])
 
         return result
@@ -763,9 +763,8 @@ class SecurityMaster:
     def sid_to_permno(self, sid: Optional[int]) -> int:
         if sid is None:
             raise ValueError("security_id is None")
-        security_map = self.security_map()
         permno = (
-            security_map.filter(
+            self.master_tb.filter(
                 pl.col('security_id').eq(sid)
             )
             .select('permno')
