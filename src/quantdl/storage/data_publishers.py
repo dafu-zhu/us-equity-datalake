@@ -292,6 +292,78 @@ class DataPublishers:
             self.logger.error(f'Unexpected error publishing {sym}: {e}')
             return {'symbol': sym, 'status': 'failed', 'error': str(e)}
 
+    def publish_daily_ticks_to_history(
+        self,
+        security_id: int,
+        df: pl.DataFrame,
+        symbol: str = ""
+    ) -> Dict[str, Optional[str]]:
+        """
+        Publish complete daily ticks history for a security_id.
+
+        Unlike _publish_daily_ticks_df, this writes complete history data
+        without year-by-year append logic. Used for bulk backfill operations.
+
+        Storage: data/raw/ticks/daily/{security_id}/history.parquet
+
+        :param security_id: Security ID from SecurityMaster
+        :param df: Complete Polars DataFrame with all daily ticks
+        :param symbol: Symbol name for logging (optional)
+        :return: Dict with status info
+        """
+        try:
+            if len(df) == 0:
+                return {
+                    'symbol': symbol,
+                    'security_id': security_id,
+                    'status': 'skipped',
+                    'error': 'No data available'
+                }
+
+            s3_key = f"data/raw/ticks/daily/{security_id}/history.parquet"
+
+            # Sort by timestamp
+            df = df.sort('timestamp')
+
+            # Write to buffer
+            buffer = io.BytesIO()
+            df.write_parquet(buffer)
+            buffer.seek(0)
+
+            s3_metadata = {
+                'security_id': str(security_id),
+                'symbols': [symbol] if symbol else [],
+                'data_type': 'daily_ticks',
+                'source': 'crsp',
+                'trading_days': str(len(df)),
+                'partition_type': 'history'
+            }
+
+            # Prepare metadata
+            s3_metadata_prepared = {
+                k: json.dumps(v) if isinstance(v, (list, dict)) else str(v)
+                for k, v in s3_metadata.items()
+            }
+
+            # Upload to S3
+            self.upload_fileobj(buffer, s3_key, s3_metadata_prepared)
+
+            return {
+                'symbol': symbol,
+                'security_id': security_id,
+                'status': 'success',
+                'error': None
+            }
+
+        except Exception as e:
+            self.logger.error(f'Error publishing history for sid={security_id}: {e}')
+            return {
+                'symbol': symbol,
+                'security_id': security_id,
+                'status': 'failed',
+                'error': str(e)
+            }
+
     def minute_ticks_worker(
         self,
         data_queue: queue.Queue,

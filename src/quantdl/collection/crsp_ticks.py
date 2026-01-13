@@ -705,6 +705,127 @@ class CRSPDailyTicks:
 
         return result_dict
 
+    def collect_daily_ticks_full_history_bulk(
+        self,
+        permnos: List[int],
+        start_date: str = '2009-01-01',
+        end_date: str = '2024-12-31',
+        adjusted: bool = True,
+        chunk_size: int = 500
+    ) -> Dict[int, pl.DataFrame]:
+        """
+        Bulk fetch complete history for a list of permnos.
+
+        Unlike other bulk methods, this takes permnos directly to avoid
+        symbol resolution overhead. Use this for backfill operations where
+        you've already resolved permnos from SecurityMaster.
+
+        :param permnos: List of CRSP permanent identifiers
+        :param start_date: Start date in 'YYYY-MM-DD' format (default: '2009-01-01')
+        :param end_date: End date in 'YYYY-MM-DD' format (default: '2024-12-31')
+        :param adjusted: If True, apply split adjustments (default: True)
+        :param chunk_size: Number of permnos per SQL query (default: 500)
+        :return: Dictionary {permno: DataFrame} with full OHLCV history
+        """
+        self.logger.info(
+            f"Fetching full history for {len(permnos)} permnos "
+            f"from {start_date} to {end_date}"
+        )
+
+        # Validate dates
+        validated_start = validate_date_string(start_date)
+        validated_end = validate_date_string(end_date)
+
+        # Chunk permnos for query batching
+        if chunk_size <= 0:
+            chunk_size = len(permnos)
+        chunks = [permnos[i:i + chunk_size] for i in range(0, len(permnos), chunk_size)]
+
+        frames = []
+        for chunk in tqdm(chunks, desc="Fetching history", unit="chunk"):
+            # Validate each permno
+            validated_chunk = [validate_permno(p) for p in chunk]
+            permno_list_str = ','.join(map(str, validated_chunk))
+
+            if adjusted:
+                query = f"""
+                    SELECT
+                        permno,
+                        date,
+                        openprc / cfacpr as open,
+                        askhi / cfacpr as high,
+                        bidlo / cfacpr as low,
+                        abs(prc) / cfacpr as close,
+                        vol * cfacshr as volume
+                    FROM crsp.dsf
+                    WHERE permno IN ({permno_list_str})
+                        AND date >= '{validated_start}'
+                        AND date <= '{validated_end}'
+                        AND prc IS NOT NULL
+                        AND cfacpr IS NOT NULL
+                        AND cfacpr != 0
+                        AND cfacshr IS NOT NULL
+                        AND cfacshr != 0
+                    ORDER BY permno, date ASC
+                """
+            else:
+                query = f"""
+                    SELECT
+                        permno,
+                        date,
+                        openprc as open,
+                        askhi as high,
+                        bidlo as low,
+                        abs(prc) as close,
+                        vol as volume
+                    FROM crsp.dsf
+                    WHERE permno IN ({permno_list_str})
+                        AND date >= '{validated_start}'
+                        AND date <= '{validated_end}'
+                        AND prc IS NOT NULL
+                    ORDER BY permno, date ASC
+                """
+
+            frames.append(raw_sql_with_retry(self.conn, query, date_cols=['date']))
+
+        if frames:
+            df_pandas = pd.concat(frames, ignore_index=True)
+        else:
+            df_pandas = pd.DataFrame()
+
+        self.logger.info(f"Fetched {len(df_pandas)} total rows from CRSP")
+
+        # Split results by permno
+        result_dict: Dict[int, pl.DataFrame] = {}
+
+        if not df_pandas.empty:
+            df_polars = pl.from_pandas(df_pandas)
+
+            for permno in permnos:
+                permno_df = (
+                    df_polars
+                    .filter(pl.col('permno') == permno)
+                    .with_columns([
+                        pl.col('date').cast(pl.Date).alias('timestamp'),
+                        pl.col('open').cast(pl.Float64),
+                        pl.col('high').cast(pl.Float64),
+                        pl.col('low').cast(pl.Float64),
+                        pl.col('close').cast(pl.Float64),
+                        pl.col('volume').cast(pl.Int64)
+                    ])
+                    .select(['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                )
+                if len(permno_df) > 0:
+                    result_dict[permno] = permno_df.with_columns(
+                        pl.col('timestamp').dt.strftime('%Y-%m-%d')
+                    )
+
+        self.logger.info(
+            f"Full history fetch: {len(result_dict)}/{len(permnos)} permnos have data"
+        )
+
+        return result_dict
+
     def collect_daily_ticks(self, symbol: str, year: int, month: int, adjusted: bool=True, auto_resolve: bool=True) -> List[Dict[str, Any]]:
         """
         Collect daily ticks for a specific month and return as DataFrame.

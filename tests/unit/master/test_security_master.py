@@ -1325,6 +1325,69 @@ class TestSecurityMasterS3Operations:
 
     @patch('quantdl.master.security_master.setup_logger')
     @patch('quantdl.master.security_master.raw_sql_with_retry')
+    def test_init_s3_missing_permno_fallback(self, mock_sql, mock_logger):
+        """Test fallback to WRDS when S3 data missing permno column (schema mismatch)"""
+        import io
+        import pyarrow.parquet as pq
+
+        # Create test data WITHOUT permno column (old schema)
+        test_df = pl.DataFrame({
+            'security_id': [101],
+            'symbol': ['AAPL'],
+            'company': ['Apple Inc'],
+            'cik': ['0000320193'],
+            'cusip': ['037833100'],
+            'start_date': [dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2020, 12, 31)]
+        })
+
+        table = test_df.to_arrow()
+        metadata = {
+            b'crsp_end_date': b'2024-12-31',
+            b'version': b'1.0'
+        }
+        table = table.replace_schema_metadata(metadata)
+
+        buffer = io.BytesIO()
+        pq.write_table(table, buffer)
+        buffer.seek(0)
+
+        mock_s3 = Mock()
+        mock_s3.get_object.return_value = {
+            'Body': Mock(read=Mock(return_value=buffer.read()))
+        }
+
+        # Mock WRDS data
+        mock_db = Mock()
+        mock_sql.return_value = pd.DataFrame({
+            'kypermno': [1],
+            'ticker': ['AAPL'],
+            'tsymbol': ['AAPL'],
+            'comnam': ['Apple Inc'],
+            'ncusip': ['037833100'],
+            'cik': ['0000320193'],
+            'cikdate1': [pd.Timestamp('2020-01-01')],
+            'cikdate2': [pd.Timestamp('2024-12-31')],
+            'namedt': [pd.Timestamp('2020-01-01')],
+            'nameenddt': [pd.Timestamp('2024-12-31')]
+        })
+
+        # Initialize - should detect missing permno and fallback to WRDS
+        sm = SecurityMaster(
+            db=mock_db,
+            s3_client=mock_s3,
+            bucket_name='test-bucket',
+            s3_key='test-key',
+            force_rebuild=False
+        )
+
+        # Verify fallback occurred
+        assert sm._from_s3 is False
+        assert 'permno' in sm.master_tb.columns  # Built from WRDS has permno
+        mock_sql.assert_called()
+
+    @patch('quantdl.master.security_master.setup_logger')
+    @patch('quantdl.master.security_master.raw_sql_with_retry')
     def test_init_s3_stale_metadata_fallback(self, mock_sql, mock_logger):
         """Test initialization falls back to WRDS when S3 metadata is stale (lines 216-221)"""
         import io

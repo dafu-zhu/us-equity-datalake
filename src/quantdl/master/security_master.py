@@ -212,6 +212,11 @@ class SecurityMaster:
             try:
                 self.master_tb, metadata = self._load_from_s3(s3_client, bucket_name, s3_key)
 
+                # Validate schema - must have permno column
+                if 'permno' not in self.master_tb.columns:
+                    self.logger.warning("S3 data missing 'permno' column, rebuilding from WRDS")
+                    raise ValueError("Schema mismatch: missing permno")
+
                 # Validate metadata
                 crsp_end = metadata.get('crsp_end_date')
                 if crsp_end != self.CRSP_LATEST_DATE:

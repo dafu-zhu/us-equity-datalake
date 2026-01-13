@@ -173,69 +173,6 @@ class TestUploadApp:
         app.data_collectors.collect_daily_ticks_month.assert_not_called()
         app.data_collectors.collect_daily_ticks_year.assert_not_called()
 
-    def test_upload_daily_ticks_monthly_alpaca_progress_logging(self):
-        """Progress logs every 100 symbols for monthly Alpaca uploads."""
-        app = _make_app()
-        symbols = [f"SYM{i:03d}" for i in range(100)]
-        app.universe_manager.load_symbols_for_year.return_value = symbols
-        app.validator.data_exists.return_value = False
-
-        df = pl.DataFrame({
-            "timestamp": ["2025-06-30"],
-            "open": [1.0],
-            "high": [1.1],
-            "low": [0.9],
-            "close": [1.0],
-            "volume": [100]
-        })
-        app.data_collectors.collect_daily_ticks_month_bulk.return_value = {sym: df for sym in symbols}
-        app.data_publishers.publish_daily_ticks.return_value = {"status": "success"}
-
-        app.upload_daily_ticks(2025, use_monthly_partitions=True, by_year=False, chunk_size=100, sleep_time=0.0)
-
-        info_calls = [str(call) for call in app.logger.info.call_args_list]
-        progress_logs = [c for c in info_calls if "Progress: 100/100" in c]
-        assert len(progress_logs) > 0
-
-    def test_upload_daily_ticks_by_year_progress_logging(self):
-        """Progress logs every 100 symbols for by_year uploads."""
-        app = _make_app()
-        symbols = [f"SYM{i:03d}" for i in range(100)]
-        app.universe_manager.load_symbols_for_year.return_value = symbols
-        app.validator.data_exists.return_value = False
-        app.data_collectors.collect_daily_ticks_year_bulk.return_value = {sym: pl.DataFrame() for sym in symbols}
-        app.data_publishers.publish_daily_ticks.return_value = {"status": "success"}
-
-        app.upload_daily_ticks(2024, use_monthly_partitions=True, by_year=True)
-
-        info_calls = [str(call) for call in app.logger.info.call_args_list]
-        progress_logs = [c for c in info_calls if "Progress: 100/100" in c]
-        assert len(progress_logs) > 0
-
-    def test_upload_daily_ticks_yearly_alpaca_progress_logging(self):
-        """Progress logs every 50 symbols for yearly Alpaca uploads."""
-        app = _make_app()
-        symbols = [f"SYM{i:03d}" for i in range(50)]
-        app.universe_manager.load_symbols_for_year.return_value = symbols
-        app.validator.data_exists.return_value = False
-
-        df = pl.DataFrame({
-            "timestamp": ["2025-06-30"],
-            "open": [1.0],
-            "high": [1.1],
-            "low": [0.9],
-            "close": [1.0],
-            "volume": [100]
-        })
-        app.data_collectors.collect_daily_ticks_year_bulk.return_value = {sym: df for sym in symbols}
-        app.data_publishers.publish_daily_ticks.return_value = {"status": "success"}
-
-        app.upload_daily_ticks(2025, use_monthly_partitions=False, chunk_size=50)
-
-        info_calls = [str(call) for call in app.logger.info.call_args_list]
-        progress_logs = [c for c in info_calls if "Progress: 50/50" in c]
-        assert len(progress_logs) > 0
-
     def test_upload_daily_ticks_yearly_crsp_failed_status_counts(self):
         """Yearly CRSP path handles failed status branch."""
         app = _make_app()
@@ -979,6 +916,7 @@ class TestUploadApp:
         app.upload_derived_fundamental = Mock()
         app.upload_ttm_fundamental = Mock()
         app.upload_daily_ticks = Mock()
+        app._upload_crsp_bulk_history = Mock()  # New bulk method for CRSP years
         app.upload_minute_ticks = Mock()
         app.upload_top_3000_monthly = Mock()
 
@@ -998,7 +936,8 @@ class TestUploadApp:
         app.upload_fundamental.assert_called_once()
         app.upload_derived_fundamental.assert_called_once()
         app.upload_ttm_fundamental.assert_called_once()
-        app.upload_daily_ticks.assert_called_once()
+        # CRSP years use bulk history method
+        app._upload_crsp_bulk_history.assert_called_once()
         app.upload_top_3000_monthly.assert_called_once()
 
     def test_run_skips_minute_ticks_before_2017(self):
@@ -1135,58 +1074,6 @@ class TestUploadApp:
 
         assert app.logger.info.called
 
-    def test_upload_daily_ticks_yearly_progress_logging(self):
-        """Test progress logging every 50 symbols for yearly partitions"""
-        app = _make_app()
-        # Create 100 symbols to trigger progress logging at 50
-        symbols = [f"SYM{i:03d}" for i in range(100)]
-        app.universe_manager.load_symbols_for_year.return_value = symbols
-        app.validator.data_exists.return_value = False
-
-        df = pl.DataFrame({
-            "timestamp": ["2024-06-30"],
-            "open": [190.0],
-            "high": [195.0],
-            "low": [189.0],
-            "close": [193.0],
-            "volume": [50000000]
-        })
-        app.data_collectors.collect_daily_ticks_year.return_value = df
-        app.data_publishers.publish_daily_ticks.return_value = {"status": "success"}
-
-        app.upload_daily_ticks(2024, use_monthly_partitions=False)
-
-        # Should log progress at 50 symbols
-        info_calls = [str(call) for call in app.logger.info.call_args_list]
-        progress_logs = [c for c in info_calls if "Progress: 50/" in c]
-        assert len(progress_logs) > 0
-
-    def test_upload_daily_ticks_monthly_progress_logging(self):
-        """Test progress logging every 100 symbols for monthly partitions"""
-        app = _make_app()
-        # Create 150 symbols to trigger progress logging at 100
-        symbols = [f"SYM{i:03d}" for i in range(150)]
-        app.universe_manager.load_symbols_for_year.return_value = symbols
-        app.validator.data_exists.return_value = False
-
-        df = pl.DataFrame({
-            "timestamp": ["2024-06-30"],
-            "open": [190.0],
-            "high": [195.0],
-            "low": [189.0],
-            "close": [193.0],
-            "volume": [50000000]
-        })
-        app.data_collectors.collect_daily_ticks_month.return_value = df
-        app.data_publishers.publish_daily_ticks.return_value = {"status": "success"}
-
-        app.upload_daily_ticks(2024, use_monthly_partitions=True)
-
-        # Should log progress at 100 symbols for first month
-        info_calls = [str(call) for call in app.logger.info.call_args_list]
-        progress_logs = [c for c in info_calls if "Progress: 100/" in c]
-        assert len(progress_logs) > 0
-
     def test_upload_fundamental_with_skipped_symbols_detail_logging(self):
         """Test detailed logging of skipped symbols with company names"""
         app = _make_app()
@@ -1317,59 +1204,6 @@ class TestUploadApp:
         non_sec_logs = [c for c in info_calls if "Non-SEC filers (skipped):" in c]
         assert len(non_sec_logs) > 0
 
-    def test_upload_fundamental_progress_logging_every_50(self):
-        """Test progress logging every 50 symbols in fundamental upload"""
-        app = _make_app()
-        # Create 100 symbols to trigger progress logging
-        symbols = [f"SYM{i:03d}" for i in range(100)]
-        app.universe_manager.load_symbols_for_year.return_value = symbols
-        cik_map = {sym: f"{i:010d}" for i, sym in enumerate(symbols)}
-        app.cik_resolver.batch_prefetch_ciks.return_value = cik_map
-
-        future = Mock()
-        future.result.return_value = {"status": "success"}
-        futures = [future] * 100
-
-        executor = Mock()
-        executor.__enter__ = Mock(return_value=executor)
-        executor.__exit__ = Mock(return_value=False)
-        executor.submit = Mock(return_value=future)
-
-        with patch('quantdl.storage.app.ThreadPoolExecutor', return_value=executor):
-            with patch('quantdl.storage.app.as_completed', return_value=futures):
-                app.upload_fundamental("2024-01-01", "2024-12-31", max_workers=1, overwrite=False)
-
-        # Should log progress at 50 symbols
-        info_calls = [str(call) for call in app.logger.info.call_args_list]
-        progress_logs = [c for c in info_calls if "Progress: 50/" in c]
-        assert len(progress_logs) > 0
-
-    def test_upload_ttm_fundamental_progress_logging(self):
-        """Test progress logging in TTM fundamental upload"""
-        app = _make_app()
-        symbols = [f"SYM{i:03d}" for i in range(100)]
-        app.universe_manager.load_symbols_for_year.return_value = symbols
-        cik_map = {sym: f"{i:010d}" for i, sym in enumerate(symbols)}
-        app.cik_resolver.batch_prefetch_ciks.return_value = cik_map
-
-        future = Mock()
-        future.result.return_value = {"status": "success"}
-        futures = [future] * 100
-
-        executor = Mock()
-        executor.__enter__ = Mock(return_value=executor)
-        executor.__exit__ = Mock(return_value=False)
-        executor.submit = Mock(return_value=future)
-
-        with patch('quantdl.storage.app.ThreadPoolExecutor', return_value=executor):
-            with patch('quantdl.storage.app.as_completed', return_value=futures):
-                app.upload_ttm_fundamental("2024-01-01", "2024-12-31", max_workers=1, overwrite=False)
-
-        # Should log progress at 50 symbols
-        info_calls = [str(call) for call in app.logger.info.call_args_list]
-        progress_logs = [c for c in info_calls if "Progress: 50/" in c]
-        assert len(progress_logs) > 0
-
     def test_upload_ttm_fundamental_with_skipped_symbols(self):
         """Test TTM upload with skipped symbols tracking"""
         app = _make_app()
@@ -1430,32 +1264,6 @@ class TestUploadApp:
 
         assert app.logger.info.called
 
-    def test_upload_derived_fundamental_progress_logging(self):
-        """Test progress logging in derived fundamental upload"""
-        app = _make_app()
-        symbols = [f"SYM{i:03d}" for i in range(100)]
-        app.universe_manager.load_symbols_for_year.return_value = symbols
-        cik_map = {sym: f"{i:010d}" for i, sym in enumerate(symbols)}
-        app.cik_resolver.batch_prefetch_ciks.return_value = cik_map
-
-        future = Mock()
-        future.result.return_value = {"status": "success"}
-        futures = [future] * 100
-
-        executor = Mock()
-        executor.__enter__ = Mock(return_value=executor)
-        executor.__exit__ = Mock(return_value=False)
-        executor.submit = Mock(return_value=future)
-
-        with patch('quantdl.storage.app.ThreadPoolExecutor', return_value=executor):
-            with patch('quantdl.storage.app.as_completed', return_value=futures):
-                app.upload_derived_fundamental("2024-01-01", "2024-12-31", max_workers=1, overwrite=False)
-
-        # Should log progress at 50 symbols
-        info_calls = [str(call) for call in app.logger.info.call_args_list]
-        progress_logs = [c for c in info_calls if "Progress: 50/" in c]
-        assert len(progress_logs) > 0
-
     def test_upload_derived_fundamental_with_various_statuses(self):
         """Test derived upload with mixed success, failed, canceled, skipped"""
         app = _make_app()
@@ -1484,51 +1292,6 @@ class TestUploadApp:
                 app.upload_derived_fundamental("2024-01-01", "2024-12-31", max_workers=1, overwrite=False)
 
         assert app.logger.info.called
-
-    def test_upload_minute_ticks_progress_logging_every_100(self):
-        """Test progress logging every 100 tasks in minute ticks upload"""
-        app = _make_app()
-        # Create 150 symbols with 1 day each = 150 tasks
-        symbols = [f"SYM{i:03d}" for i in range(150)]
-        app.universe_manager.load_symbols_for_year.return_value = symbols
-        app.calendar.load_trading_days.return_value = ["2024-06-03"]
-        app.validator.data_exists.return_value = False
-
-        df = pl.DataFrame({
-            "timestamp": ["2024-06-03T09:30:00"],
-            "open": [1.0],
-            "high": [1.1],
-            "low": [0.9],
-            "close": [1.0],
-            "volume": [100]
-        })
-
-        # Mock fetch and parse to return data for all symbols
-        def mock_fetch(chunk, year, month, sleep_time):
-            return {sym: [] for sym in chunk}
-
-        def mock_parse(symbol_bars, trading_days):
-            return {(sym, day): df for sym in symbol_bars.keys() for day in trading_days}
-
-        app.data_collectors.fetch_minute_month.side_effect = mock_fetch
-        app.data_collectors.parse_minute_bars_to_daily.side_effect = mock_parse
-
-        def worker(data_queue, stats, stats_lock):
-            while True:
-                item = data_queue.get()
-                if item is None:
-                    break
-                with stats_lock:
-                    stats["success"] += 1
-
-        app.data_publishers.minute_ticks_worker = worker
-
-        app.upload_minute_ticks(2024, 6, overwrite=True, num_workers=1, chunk_size=30, sleep_time=0.0)
-
-        # Should log progress at 100 tasks
-        info_calls = [str(call) for call in app.logger.info.call_args_list]
-        progress_logs = [c for c in info_calls if "Progress: 100/" in c]
-        assert len(progress_logs) > 0
 
     def test_close_without_universe_manager(self):
         """Test close when universe_manager is None"""
@@ -1576,7 +1339,7 @@ class TestUploadApp:
         app.universe_manager.load_symbols_for_year.return_value = ["AAPL", "MSFT"]
 
         # AAPL has data for month 1, MSFT has no data
-        def mock_exists(sym, data_type, year, month=None):
+        def mock_exists(sym, data_type, year, month=None, **kwargs):
             if sym == "AAPL" and month == 1:
                 return True
             return False

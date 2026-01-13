@@ -28,6 +28,104 @@ class TestValidator:
         )
         assert result is True
 
+    def test_data_exists_monthly_partition_with_security_id(self):
+        """Test data_exists with security_id uses security_id-based path."""
+        from quantdl.storage.validation import Validator
+
+        mock_s3_client = Mock()
+        mock_s3_client.head_object.return_value = {}
+
+        validator = Validator(s3_client=mock_s3_client, bucket_name="test-bucket")
+        result = validator.data_exists("AAPL", "ticks", year=2024, month=6, security_id=12345)
+
+        # Should use security_id in path, not symbol
+        mock_s3_client.head_object.assert_called_with(
+            Bucket="test-bucket",
+            Key='data/raw/ticks/daily/12345/2024/06/ticks.parquet'
+        )
+        assert result is True
+
+    def test_data_exists_yearly_with_security_id_uses_history_path(self):
+        """Test data_exists with security_id and year (no month) uses history.parquet path."""
+        from quantdl.storage.validation import Validator
+
+        mock_s3_client = Mock()
+        mock_s3_client.head_object.return_value = {}
+
+        validator = Validator(s3_client=mock_s3_client, bucket_name="test-bucket")
+        result = validator.data_exists("AAPL", "ticks", year=2024, security_id=12345)
+
+        # With security_id, yearly check uses history.parquet
+        mock_s3_client.head_object.assert_called_with(
+            Bucket="test-bucket",
+            Key='data/raw/ticks/daily/12345/history.parquet'
+        )
+        assert result is True
+
+    def test_data_exists_yearly_without_security_id_uses_legacy_path(self):
+        """Test data_exists without security_id uses legacy yearly partition path."""
+        from quantdl.storage.validation import Validator
+
+        mock_s3_client = Mock()
+        mock_s3_client.head_object.return_value = {}
+
+        validator = Validator(s3_client=mock_s3_client, bucket_name="test-bucket")
+        result = validator.data_exists("AAPL", "ticks", year=2024)
+
+        # Without security_id, falls back to legacy yearly path
+        mock_s3_client.head_object.assert_called_with(
+            Bucket="test-bucket",
+            Key='data/raw/ticks/daily/AAPL/2024/ticks.parquet'
+        )
+        assert result is True
+
+    def test_data_exists_minute_ticks_with_security_id(self):
+        """Test data_exists for minute ticks with security_id uses security_id in path."""
+        from quantdl.storage.validation import Validator
+
+        mock_s3_client = Mock()
+        mock_s3_client.head_object.return_value = {}
+
+        validator = Validator(s3_client=mock_s3_client, bucket_name="test-bucket")
+        result = validator.data_exists("AAPL", "ticks", day="2024-06-15", security_id=12345)
+
+        # Minute ticks with security_id
+        mock_s3_client.head_object.assert_called_with(
+            Bucket="test-bucket",
+            Key='data/raw/ticks/minute/12345/2024/06/15/ticks.parquet'
+        )
+        assert result is True
+
+    def test_data_exists_minute_ticks_without_security_id(self):
+        """Test data_exists for minute ticks without security_id uses symbol in path."""
+        from quantdl.storage.validation import Validator
+
+        mock_s3_client = Mock()
+        mock_s3_client.head_object.return_value = {}
+
+        validator = Validator(s3_client=mock_s3_client, bucket_name="test-bucket")
+        result = validator.data_exists("AAPL", "ticks", day="2024-06-15")
+
+        # Minute ticks without security_id uses symbol
+        mock_s3_client.head_object.assert_called_with(
+            Bucket="test-bucket",
+            Key='data/raw/ticks/minute/AAPL/2024/06/15/ticks.parquet'
+        )
+        assert result is True
+
+    def test_data_exists_not_found(self):
+        """Test data_exists returns False when object not found (404)."""
+        from quantdl.storage.validation import Validator
+
+        mock_s3_client = Mock()
+        error_response = {'Error': {'Code': '404', 'Message': 'Not Found'}}
+        mock_s3_client.head_object.side_effect = ClientError(error_response, 'HeadObject')
+
+        validator = Validator(s3_client=mock_s3_client, bucket_name="test-bucket")
+        result = validator.data_exists("AAPL", "ticks", year=2024, month=6, security_id=12345)
+
+        assert result is False
+
     def test_top_3000_exists_error_logging(self):
         """Test top_3000_exists logs error on non-404 errors - covers lines 191-192."""
         from quantdl.storage.validation import Validator

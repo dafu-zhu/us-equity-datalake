@@ -22,6 +22,7 @@ from quantdl.storage.rate_limiter import RateLimiter
 from quantdl.storage.cik_resolver import CIKResolver
 from quantdl.storage.data_collectors import DataCollectors
 from quantdl.storage.data_publishers import DataPublishers
+from quantdl.storage.progress_tracker import UploadProgressTracker
 from quantdl.collection.alpaca_ticks import Ticks
 from quantdl.collection.crsp_ticks import CRSPDailyTicks
 from quantdl.universe.manager import UniverseManager
@@ -145,10 +146,18 @@ class UploadApp:
         :param use_monthly_partitions: If True, use monthly partitioning (default)
         """
         # Resolve symbol to security_id
-        security_id = self.crsp_ticks.security_master.get_security_id(sym, f"{year}-12-31")
+        try:
+            security_id = self.crsp_ticks.security_master.get_security_id(sym, f"{year}-12-31")
+        except ValueError as e:
+            # Symbol not active in this year - skip
+            return {
+                'symbol': sym,
+                'status': 'skipped',
+                'error': str(e)
+            }
 
         # Validate: Check if data already exists (before collection)
-        if not overwrite and self.validator.data_exists(sym, 'ticks', year, month):
+        if not overwrite and self.validator.data_exists(sym, 'ticks', year, month, security_id=security_id):
             return {
                 'symbol': sym,
                 'status': 'canceled',
@@ -168,6 +177,197 @@ class UploadApp:
             return self.data_publishers.publish_daily_ticks(sym, year, security_id, df, month=month, by_year=False)
         else:
             return self.data_publishers.publish_daily_ticks(sym, year, security_id, df, by_year=False)
+
+    def _upload_crsp_bulk_history(
+        self,
+        start_year: int = 2009,
+        end_year: int = 2024,
+        overwrite: bool = False,
+        chunk_size: int = 500,
+        resume: bool = True
+    ):
+        """
+        Upload daily ticks for CRSP years using permno-centric bulk fetch.
+
+        Fetches complete history per permno ONCE instead of year-by-year.
+        Much more efficient: ~10 bulk queries vs ~80,000 symbol-year fetches.
+
+        :param start_year: Start year for backfill (default: 2009)
+        :param end_year: End year for backfill (default: 2024)
+        :param overwrite: If True, ignore progress and re-fetch all
+        :param chunk_size: Number of permnos per CRSP query (default: 500)
+        :param resume: If True, skip already completed security_ids
+        """
+        if not self._wrds_available:
+            raise RuntimeError(
+                "CRSP bulk history upload requires WRDS connection. "
+                "Ensure WRDS credentials are set."
+            )
+
+        start_date = f"{start_year}-01-01"
+        end_date = f"{end_year}-12-31"
+
+        self.logger.info(
+            f"Starting CRSP bulk history upload: {start_year}-{end_year}"
+        )
+        self.logger.info(f"Strategy: permno-centric fetch, {chunk_size} permnos/batch")
+
+        # Step 1: Build permno -> [(security_id, start, end), ...] mapping
+        self.logger.info("Step 1/4: Building permno -> security_id mapping...")
+        master_tb = self.security_master.master_tb
+
+        # Get all unique permnos and their security_id mappings
+        permno_sid_map: Dict[int, List[tuple]] = {}
+        all_security_ids = set()
+
+        for row in master_tb.iter_rows(named=True):
+            permno = row['permno']
+            sid = row['security_id']
+            start = row['start_date']
+            end = row['end_date']
+
+            if sid is None or permno is None:
+                continue
+
+            all_security_ids.add(sid)
+            if permno not in permno_sid_map:
+                permno_sid_map[permno] = []
+            permno_sid_map[permno].append((sid, start, end))
+
+        unique_permnos = list(permno_sid_map.keys())
+        self.logger.info(
+            f"Found {len(unique_permnos)} unique permnos, "
+            f"{len(all_security_ids)} unique security_ids"
+        )
+
+        # Step 2: Filter out completed security_ids (if resume)
+        tracker = UploadProgressTracker(
+            s3_client=self.client,
+            bucket_name='us-equity-datalake',
+            task_name='daily_ticks_crsp_bulk'
+        )
+
+        if resume and not overwrite:
+            self.logger.info("Step 2/4: Checking progress for resume...")
+            completed_sids = tracker.load()
+            pending_sids = all_security_ids - completed_sids
+
+            # Filter permnos to only those with pending security_ids
+            permnos_to_fetch = []
+            for permno, sid_list in permno_sid_map.items():
+                # Check if any security_id for this permno is pending
+                if any(sid in pending_sids for sid, _, _ in sid_list):
+                    permnos_to_fetch.append(permno)
+
+            self.logger.info(
+                f"Resuming: {len(completed_sids)} security_ids completed, "
+                f"{len(pending_sids)} pending, {len(permnos_to_fetch)} permnos to fetch"
+            )
+        else:
+            permnos_to_fetch = unique_permnos
+            pending_sids = all_security_ids
+            if overwrite:
+                tracker.reset()
+
+        tracker.set_total(len(all_security_ids))
+
+        if not permnos_to_fetch:
+            self.logger.info("All security_ids already completed. Nothing to do.")
+            return
+
+        # Step 3: Batch fetch full history
+        self.logger.info(
+            f"Step 3/4: Fetching {len(permnos_to_fetch)} permnos "
+            f"({start_date} to {end_date})..."
+        )
+
+        # Fetch in batches
+        success = 0
+        failed = 0
+        skipped = 0
+
+        with tracker:
+            pbar = tqdm(
+                total=len(pending_sids),
+                desc="Uploading CRSP history",
+                unit="sid"
+            )
+
+            for i in range(0, len(permnos_to_fetch), chunk_size):
+                chunk = permnos_to_fetch[i:i + chunk_size]
+
+                # Bulk fetch complete history for this chunk
+                permno_data = self.crsp_ticks.collect_daily_ticks_full_history_bulk(
+                    permnos=chunk,
+                    start_date=start_date,
+                    end_date=end_date,
+                    chunk_size=chunk_size
+                )
+
+                # Step 4: Split by security_id and publish
+                for permno in chunk:
+                    if permno not in permno_data:
+                        # No data for this permno (likely delisted before start_year)
+                        for sid, _, _ in permno_sid_map.get(permno, []):
+                            if sid in pending_sids:
+                                skipped += 1
+                                tracker.mark_skipped(sid)
+                                pbar.update(1)
+                        continue
+
+                    df = permno_data[permno]
+
+                    # Split data by security_id date ranges
+                    for sid, sid_start, sid_end in permno_sid_map.get(permno, []):
+                        if sid not in pending_sids:
+                            continue  # Already completed
+
+                        # Filter data for this security_id's date range
+                        sid_df = df.filter(
+                            (pl.col('timestamp') >= str(sid_start)) &
+                            (pl.col('timestamp') <= str(sid_end))
+                        )
+
+                        if len(sid_df) == 0:
+                            skipped += 1
+                            tracker.mark_skipped(sid)
+                            pbar.update(1)
+                            pbar.set_postfix(ok=success, fail=failed, skip=skipped)
+                            continue
+
+                        # Get symbol for this security_id (for logging)
+                        symbol_info = master_tb.filter(
+                            pl.col('security_id') == sid
+                        ).select('symbol').head(1)
+                        symbol = symbol_info['symbol'][0] if len(symbol_info) > 0 else f"sid_{sid}"
+
+                        # Publish to history.parquet
+                        try:
+                            result = self.data_publishers.publish_daily_ticks_to_history(
+                                security_id=sid,
+                                df=sid_df,
+                                symbol=symbol
+                            )
+                            if result.get('status') == 'success':
+                                success += 1
+                                tracker.mark_completed(sid)
+                            else:
+                                failed += 1
+                                tracker.mark_failed(sid)
+                        except Exception as e:
+                            self.logger.error(f"Failed to publish sid={sid}: {e}")
+                            failed += 1
+                            tracker.mark_failed(sid)
+
+                        pbar.update(1)
+                        pbar.set_postfix(ok=success, fail=failed, skip=skipped)
+
+            pbar.close()
+
+        self.logger.info(
+            f"CRSP bulk history upload completed: {success} success, "
+            f"{failed} failed, {skipped} skipped"
+        )
 
     def upload_daily_ticks(
         self,
@@ -226,6 +426,14 @@ class UploadApp:
         alpaca_start_year = self.data_collectors.ticks_collector.alpaca_start_year
         data_source = 'crsp' if year < alpaca_start_year else 'alpaca'
 
+        # Pre-resolve security_ids for all symbols (used for data_exists and publishing)
+        security_id_cache = {}
+        for sym in alpaca_symbols:
+            try:
+                security_id_cache[sym] = self.crsp_ticks.security_master.get_security_id(sym, f"{year}-12-31")
+            except ValueError:
+                security_id_cache[sym] = None  # Symbol not active in this year
+
         if use_monthly_partitions:
             # Upload month by month for better organization
             self.logger.info(
@@ -243,23 +451,28 @@ class UploadApp:
                     )
 
                 for month in range(1, 13):
-                    completed = 0
                     success = 0
                     failed = 0
                     canceled = 0
                     skipped = 0
 
+                    pbar = tqdm(total=total_symbols, desc=f"Uploading {year}-{month:02d}", unit="sym")
                     for i in range(0, total_symbols, chunk_size):
                         chunk = alpaca_symbols[i:i + chunk_size]
 
                         if not overwrite:
                             symbols_to_fetch = []
                             for sym in chunk:
-                                if self.validator.data_exists(sym, 'ticks', year, month):
+                                sec_id = security_id_cache.get(sym)
+                                if sec_id is None:
+                                    skipped += 1
+                                    pbar.update(1)
+                                elif self.validator.data_exists(sym, 'ticks', year, month, security_id=sec_id):
                                     canceled += 1
-                                    completed += 1
+                                    pbar.update(1)
                                 else:
                                     symbols_to_fetch.append(sym)
+                            pbar.set_postfix(ok=success, fail=failed, skip=skipped, cancel=canceled)
                             if not symbols_to_fetch:
                                 continue
                             chunk = symbols_to_fetch
@@ -272,7 +485,7 @@ class UploadApp:
                         )
 
                         for sym in chunk:
-                            security_id = self.crsp_ticks.security_master.get_security_id(sym, f"{year}-12-31")
+                            security_id = security_id_cache[sym]
                             df = symbol_map.get(sym, pl.DataFrame())
                             result = self.data_publishers.publish_daily_ticks(
                                 sym,
@@ -282,7 +495,6 @@ class UploadApp:
                                 month=month,
                                 by_year=False
                             )
-                            completed += 1
 
                             if result['status'] == 'success':
                                 success += 1
@@ -293,13 +505,10 @@ class UploadApp:
                             else:
                                 failed += 1
 
-                            if completed % 100 == 0:
-                                self.logger.info(
-                                    f"{year}-{month:02d} Progress: {completed}/{total_symbols} "
-                                    f"({success} success, {failed} failed, "
-                                    f"{canceled} canceled, {skipped} skipped)"
-                                )
+                            pbar.update(1)
+                            pbar.set_postfix(ok=success, fail=failed, skip=skipped, cancel=canceled)
 
+                    pbar.close()
                     self.logger.info(
                         f"{year}-{month:02d} completed: {failed} failed, {success} success, "
                         f"{canceled} canceled, {skipped} skipped out of {total_symbols} total"
@@ -320,18 +529,25 @@ class UploadApp:
                         year
                     )
 
-                for sym in tqdm(alpaca_symbols, desc=f"Uploading {year} symbols", unit="sym"):
+                pbar = tqdm(alpaca_symbols, desc=f"Uploading {year} symbols", unit="sym")
+                for sym in pbar:
+                    security_id = security_id_cache.get(sym)
+                    if security_id is None:
+                        skipped += 1
+                        completed += 1
+                        pbar.set_postfix(ok=success, fail=failed, skip=skipped, cancel=canceled)
+                        continue
+
                     if not overwrite:
                         any_exists = any(
-                            self.validator.data_exists(sym, 'ticks', year, month)
+                            self.validator.data_exists(sym, 'ticks', year, month, security_id=security_id)
                             for month in range(1, 13)
                         )
                         if any_exists:
                             canceled += 1
                             completed += 1
+                            pbar.set_postfix(ok=success, fail=failed, skip=skipped, cancel=canceled)
                             continue
-
-                    security_id = self.crsp_ticks.security_master.get_security_id(sym, f"{year}-12-31")
 
                     year_df = None
                     if year < 2025:
@@ -356,11 +572,7 @@ class UploadApp:
                     else:
                         failed += 1
 
-                    if completed % 100 == 0:
-                        self.logger.info(
-                            f"{year} Progress: {completed}/{total_symbols} "
-                            f"({success} success, {failed} failed, {canceled} canceled, {skipped} skipped)"
-                        )
+                    pbar.set_postfix(ok=success, fail=failed, skip=skipped, cancel=canceled)
 
                 self.logger.info(
                     f"{year} completed: {failed} failed, {success} success, "
@@ -375,11 +587,12 @@ class UploadApp:
                     canceled = 0
                     skipped = 0
 
-                    for sym in tqdm(
+                    pbar = tqdm(
                         alpaca_symbols,
                         desc=f"Uploading {year}-{month:02d} symbols",
                         unit="sym"
-                    ):
+                    )
+                    for sym in pbar:
                         result = self._publish_single_daily_ticks(
                             sym, year, month=month, overwrite=overwrite, use_monthly_partitions=True
                         )
@@ -394,17 +607,12 @@ class UploadApp:
                         else:
                             failed += 1
 
-                        # Progress logging every 100 symbols
-                        if completed % 100 == 0:
-                            self.logger.info(
-                                f"{year}-{month:02d} Progress: {completed}/{total_symbols} "
-                                f"({success} success, {failed} failed, {canceled} canceled, {skipped} skipped)"
-                            )
+                        pbar.set_postfix(ok=success, fail=failed, skip=skipped, cancel=canceled)
 
-                        self.logger.info(
-                            f"{year}-{month:02d} completed: {failed} failed, {success} success, "
-                            f"{canceled} canceled, {skipped} skipped out of {total_symbols} total"
-                        )
+                    self.logger.info(
+                        f"{year}-{month:02d} completed: {failed} failed, {success} success, "
+                        f"{canceled} canceled, {skipped} skipped out of {total_symbols} total"
+                    )
 
         else:
             # History mode (for completed years)
@@ -416,24 +624,29 @@ class UploadApp:
             storage_path = f"data/raw/ticks/daily/{{security_id}}/history.parquet" if is_completed_year else f"data/raw/ticks/daily/{{security_id}}/{year}/ticks.parquet"
             self.logger.info(f"Storage: {storage_path}")
 
-            completed = 0
             success = 0
             failed = 0
             canceled = 0
             skipped = 0
 
             if year >= alpaca_start_year:
+                pbar = tqdm(total=total_symbols, desc=f"Uploading {year} history", unit="sym")
                 for i in range(0, total_symbols, chunk_size):
                     chunk = alpaca_symbols[i:i + chunk_size]
 
                     if not overwrite:
                         symbols_to_fetch = []
                         for sym in chunk:
-                            if self.validator.data_exists(sym, 'ticks', year):
+                            sec_id = security_id_cache.get(sym)
+                            if sec_id is None:
+                                skipped += 1
+                                pbar.update(1)
+                            elif self.validator.data_exists(sym, 'ticks', year, security_id=sec_id):
                                 canceled += 1
-                                completed += 1
+                                pbar.update(1)
                             else:
                                 symbols_to_fetch.append(sym)
+                        pbar.set_postfix(ok=success, fail=failed, skip=skipped, cancel=canceled)
                         if not symbols_to_fetch:
                             continue
                         chunk = symbols_to_fetch
@@ -444,7 +657,7 @@ class UploadApp:
                     )
 
                     for sym in chunk:
-                        security_id = self.crsp_ticks.security_master.get_security_id(sym, f"{year}-12-31")
+                        security_id = security_id_cache[sym]
                         df = symbol_map.get(sym, pl.DataFrame())
                         result = self.data_publishers.publish_daily_ticks(
                             sym,
@@ -454,7 +667,6 @@ class UploadApp:
                             month=None,
                             by_year=False
                         )
-                        completed += 1
 
                         if result['status'] == 'success':
                             success += 1
@@ -465,23 +677,21 @@ class UploadApp:
                         else:
                             failed += 1
 
-                        if completed % 50 == 0:
-                            self.logger.info(
-                                f"{year} Progress: {completed}/{total_symbols} "
-                                f"({success} success, {failed} failed, {canceled} canceled, {skipped} skipped)"
-                            )
+                        pbar.update(1)
+                        pbar.set_postfix(ok=success, fail=failed, skip=skipped, cancel=canceled)
 
+                pbar.close()
                 self.logger.info(
                     f"{year} Daily ticks upload completed ({data_source}): {success} success, "
                     f"{failed} failed, {canceled} canceled, {skipped} skipped out of {total_symbols} total"
                 )
                 return
 
-            for sym in tqdm(alpaca_symbols, desc=f"Uploading {year} symbols", unit="sym"):
+            pbar = tqdm(alpaca_symbols, desc=f"Uploading {year} symbols", unit="sym")
+            for sym in pbar:
                 result = self._publish_single_daily_ticks(
                     sym, year, overwrite=overwrite, use_monthly_partitions=False
                 )
-                completed += 1
 
                 if result['status'] == 'success':
                     success += 1
@@ -492,12 +702,7 @@ class UploadApp:
                 else:
                     failed += 1
 
-                # Progress logging every 50 symbols
-                if completed % 50 == 0:
-                    self.logger.info(
-                        f"{year} Progress: {completed}/{total_symbols} "
-                        f"({success} success, {failed} failed, {canceled} canceled, {skipped} skipped)"
-                    )
+                pbar.set_postfix(ok=success, fail=failed, skip=skipped, cancel=canceled)
 
             self.logger.info(
                 f"{year} Daily ticks upload completed ({data_source}): {success} success, "
@@ -548,10 +753,10 @@ class UploadApp:
             workers.append(worker)
 
         # Producer: Bulk fetch and parse
+        pbar = tqdm(total=total_tasks, desc=f"Uploading {year}-{month:02d} minute", unit="task")
         try:
             for i in range(0, total_symbols, chunk_size):
                 chunk = alpaca_symbols[i:i + chunk_size]
-                chunk_num = i // chunk_size + 1
 
                 # Pre-filter symbols that need data (skip if all days exist and overwrite=False)
                 if not overwrite:
@@ -567,19 +772,16 @@ class UploadApp:
                             symbols_to_fetch.append(sym)
                         else:
                             # All days exist, mark them all as canceled
-                            for day in trading_days:
-                                with stats_lock:
-                                    stats['canceled'] += 1
-                                    stats['completed'] += 1
+                            canceled_count = len(trading_days)
+                            with stats_lock:
+                                stats['canceled'] += canceled_count
+                                stats['completed'] += canceled_count
+                            pbar.update(canceled_count)
 
+                    pbar.set_postfix(ok=stats['success'], fail=stats['failed'], skip=stats['skipped'], cancel=stats['canceled'])
                     if not symbols_to_fetch:
-                        self.logger.info(f"Skipping chunk {chunk_num}: all data already exists")
                         continue
-
-                    self.logger.info(f"Fetching chunk {chunk_num}/{(total_symbols + chunk_size - 1) // chunk_size}: {len(symbols_to_fetch)}/{len(chunk)} symbols (skipped {len(chunk) - len(symbols_to_fetch)})")
                     chunk = symbols_to_fetch
-                else:
-                    self.logger.info(f"Fetching chunk {chunk_num}/{(total_symbols + chunk_size - 1) // chunk_size}: {len(chunk)} symbols")
 
                 # Bulk fetch for the month
                 start = time.perf_counter()
@@ -598,22 +800,15 @@ class UploadApp:
                         with stats_lock:
                             stats['skipped'] += 1
                             stats['completed'] += 1
+                        pbar.update(1)
                     else:
                         # Put in queue for upload
                         data_queue.put((sym, day, minute_df))
-
                         with stats_lock:
                             stats['completed'] += 1
-                            completed = stats['completed']
+                        pbar.update(1)
 
-                        # Progress logging
-                        if completed % 100 == 0:
-                            with stats_lock:
-                                self.logger.info(
-                                    f"Progress: {completed}/{total_tasks} "
-                                    f"({stats['success']} success, {stats['failed']} failed, "
-                                    f"{stats['canceled']} canceled, {stats['skipped']} skipped)"
-                                )
+                    pbar.set_postfix(ok=stats['success'], fail=stats['failed'], skip=stats['skipped'], cancel=stats['canceled'])
         except Exception as e:
             self.logger.error(f"Error in bulk fetch/parse: {e}", exc_info=True)
 
@@ -625,6 +820,8 @@ class UploadApp:
             # Wait for all workers to finish
             for worker in workers:
                 worker.join()
+
+            pbar.close()
 
         self.logger.info(
             f"Minute ticks upload completed: {stats['failed']} failed, {stats['success']} success, "
@@ -819,7 +1016,6 @@ class UploadApp:
             return
 
         # Statistics
-        completed = 0
         success = 0
         failed = 0
         canceled = 0
@@ -846,9 +1042,9 @@ class UploadApp:
             }
 
             # Process completed tasks
-            for future in as_completed(future_to_symbol):
+            pbar = tqdm(as_completed(future_to_symbol), total=total, desc="Fundamental", unit="sym")
+            for future in pbar:
                 result = future.result()
-                completed += 1
 
                 if result['status'] == 'success':
                     success += 1
@@ -865,20 +1061,12 @@ class UploadApp:
                 else:
                     failed += 1
 
-                # Progress logging every 50 symbols
-                if completed % 50 == 0:
-                    elapsed = time.time() - fetch_start
-                    rate = completed / elapsed if elapsed > 0 else 0
-                    eta = (total - completed) / rate if rate > 0 else 0
-                    self.logger.info(
-                        f"Progress: {completed}/{total} ({success} success, {failed} failed, "
-                        f"{canceled} canceled, {skipped} skipped) | Rate: {rate:.1f} sym/sec | ETA: {eta:.0f}s"
-                    )
+                pbar.set_postfix(ok=success, fail=failed, skip=skipped, cancel=canceled)
 
         # Final statistics
         total_time = time.time() - start_time
         fetch_time = time.time() - fetch_start
-        avg_rate = completed / fetch_time if fetch_time > 0 else 0
+        avg_rate = total / fetch_time if fetch_time > 0 else 0
 
         self.logger.info(
             f"Fundamental upload for {start_date} to {end_date} completed in {total_time:.1f}s: "
@@ -1009,7 +1197,6 @@ class UploadApp:
             )
             return
 
-        completed = 0
         success = 0
         failed = 0
         canceled = 0
@@ -1033,9 +1220,9 @@ class UploadApp:
                 for sym in symbols_with_cik
             }
 
-            for future in as_completed(future_to_symbol):
+            pbar = tqdm(as_completed(future_to_symbol), total=total, desc="TTM", unit="sym")
+            for future in pbar:
                 result = future.result()
-                completed += 1
 
                 if result['status'] == 'success':
                     success += 1
@@ -1051,18 +1238,11 @@ class UploadApp:
                 else:
                     failed += 1
 
-                if completed % 50 == 0:
-                    elapsed = time.time() - fetch_start
-                    rate = completed / elapsed if elapsed > 0 else 0
-                    eta = (total - completed) / rate if rate > 0 else 0
-                    self.logger.info(
-                        f"Progress: {completed}/{total} ({success} success, {failed} failed, "
-                        f"{canceled} canceled, {skipped} skipped) | Rate: {rate:.1f} sym/sec | ETA: {eta:.0f}s"
-                    )
+                pbar.set_postfix(ok=success, fail=failed, skip=skipped, cancel=canceled)
 
         total_time = time.time() - start_time
         fetch_time = time.time() - fetch_start
-        avg_rate = completed / fetch_time if fetch_time > 0 else 0
+        avg_rate = total / fetch_time if fetch_time > 0 else 0
 
         self.logger.info(
             f"TTM upload for {start_date} to {end_date} completed in {total_time:.1f}s: "
@@ -1246,7 +1426,6 @@ class UploadApp:
             return
 
         # Statistics
-        completed = 0
         success = 0
         failed = 0
         canceled = 0
@@ -1270,9 +1449,9 @@ class UploadApp:
             }
 
             # Process completed tasks
-            for future in as_completed(future_to_symbol):
+            pbar = tqdm(as_completed(future_to_symbol), total=total, desc="Derived", unit="sym")
+            for future in pbar:
                 result = future.result()
-                completed += 1
 
                 if result['status'] == 'success':
                     success += 1
@@ -1283,20 +1462,12 @@ class UploadApp:
                 else:
                     failed += 1
 
-                # Progress logging every 50 symbols
-                if completed % 50 == 0:
-                    elapsed = time.time() - fetch_start
-                    rate = completed / elapsed if elapsed > 0 else 0
-                    eta = (total - completed) / rate if rate > 0 else 0
-                    self.logger.info(
-                        f"Progress: {completed}/{total} ({success} success, {failed} failed, "
-                        f"{canceled} canceled, {skipped} skipped) | Rate: {rate:.1f} sym/sec | ETA: {eta:.0f}s"
-                    )
+                pbar.set_postfix(ok=success, fail=failed, skip=skipped, cancel=canceled)
 
         # Final statistics
         total_time = time.time() - start_time
         fetch_time = time.time() - fetch_start
-        avg_rate = completed / fetch_time if fetch_time > 0 else 0
+        avg_rate = total / fetch_time if fetch_time > 0 else 0
 
         self.logger.info(
             f"Derived fundamental upload for {start_date} to {end_date} completed in {total_time:.1f}s: "
@@ -1380,11 +1551,28 @@ class UploadApp:
             )
             self.upload_ttm_fundamental(start_date, end_date, max_workers, overwrite)
         
-        for year in range(start_year, end_year + 1):
-            self.logger.info(f"Processing year {year}")
+        # Upload daily ticks (CRSP bulk for historical, year-by-year for current)
+        if run_daily_ticks:
+            alpaca_start = self.data_collectors.ticks_collector.alpaca_start_year
+            crsp_end = min(end_year, alpaca_start - 1)
 
-            if run_daily_ticks:
-                self.logger.info(f"Uploading daily ticks for {year} (year-based, all trading days)")
+            # CRSP years: Use bulk history upload (permno-centric)
+            if start_year < alpaca_start and self._wrds_available:
+                self.logger.info(
+                    f"Uploading CRSP daily ticks ({start_year}-{crsp_end}) "
+                    "using permno-centric bulk fetch"
+                )
+                self._upload_crsp_bulk_history(
+                    start_year=start_year,
+                    end_year=crsp_end,
+                    overwrite=overwrite,
+                    chunk_size=500,
+                    resume=True
+                )
+
+            # Alpaca years: Use existing year-by-year approach
+            for year in range(max(start_year, alpaca_start), end_year + 1):
+                self.logger.info(f"Uploading Alpaca daily ticks for {year}")
                 self.upload_daily_ticks(
                     year,
                     overwrite,
@@ -1392,6 +1580,9 @@ class UploadApp:
                     chunk_size=daily_chunk_size,
                     sleep_time=daily_sleep_time
                 )
+
+        for year in range(start_year, end_year + 1):
+            self.logger.info(f"Processing year {year}")
 
             if run_minute_ticks:
                 # Upload minute ticks for all months in the year (only for years >= 2017)
