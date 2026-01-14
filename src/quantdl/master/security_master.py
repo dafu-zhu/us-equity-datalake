@@ -953,7 +953,7 @@ class SecurityMaster:
                 'start_date': pl.Date,
                 'end_date': pl.Date
             })
-            self.master_tb = pl.concat([self.master_tb, new_df])
+            self.master_tb = pl.concat([self.master_tb, new_df], how='diagonal')
 
         # 3. Export to S3 if changes made
         if s3_client and (stats['extended'] > 0 or stats['added'] > 0):

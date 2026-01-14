@@ -8,6 +8,7 @@ def main() -> None:
     parser.add_argument("--start-year", type=int, default=2009)
     parser.add_argument("--end-year", type=int, default=2025)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--resume", action="store_true", help="Resume from last checkpoint (minute ticks)")
 
     parser.add_argument("--run-fundamental", action="store_true")
     parser.add_argument("--run-derived-fundamental", action="store_true")
@@ -38,6 +39,7 @@ def main() -> None:
             end_year=args.end_year,
             max_workers=args.max_workers,
             overwrite=args.overwrite,
+            resume=args.resume,
             chunk_size=args.minute_chunk_size,
             sleep_time=args.minute_sleep_time,
             daily_chunk_size=args.daily_chunk_size,

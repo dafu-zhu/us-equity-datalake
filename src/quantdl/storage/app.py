@@ -709,7 +709,7 @@ class UploadApp:
                 f"{failed} failed, {canceled} canceled, {skipped} skipped out of {total_symbols} total"
             )
 
-    def upload_minute_ticks(self, year: int, month: int, overwrite: bool = False, num_workers: int = 50, chunk_size: int = 300, sleep_time: float = 0.2):
+    def upload_minute_ticks(self, year: int, month: int, overwrite: bool = False, resume: bool = False, num_workers: int = 50, chunk_size: int = 300, sleep_time: float = 0.2):
         """
         Upload minute ticks using bulk fetch + concurrent processing.
         Fetches 300 symbols at a time for the specified month, then processes concurrently.
@@ -717,12 +717,30 @@ class UploadApp:
         :param year: Year to fetch data for
         :param month: Month to fetch data for (1-12)
         :param overwrite: If True, overwrite existing data in S3 (default: False)
+        :param resume: If True, skip symbols already verified complete (default: False)
         :param num_workers: Number of concurrent processing workers (default: 50)
         :param chunk_size: Number of symbols to fetch at once (default: 300)
         :param sleep_time: Sleep time between API requests in seconds (default: 0.2)
         """
         # Load symbols for this month
         alpaca_symbols = self.universe_manager.load_symbols_for_year(year, sym_type='alpaca')
+
+        # Initialize progress tracker
+        tracker = UploadProgressTracker(
+            s3_client=self.client,
+            bucket_name='us-equity-datalake',
+            task_name=f'minute_ticks_{year}_{month:02d}',
+            key_type='str'
+        )
+
+        # Filter out already-completed symbols if resuming
+        if resume and not overwrite:
+            completed_symbols = tracker.load()
+            original_count = len(alpaca_symbols)
+            alpaca_symbols = [s for s in alpaca_symbols if s not in completed_symbols]
+            self.logger.info(f"Resuming: {len(completed_symbols)} symbols complete, {len(alpaca_symbols)} pending (of {original_count})")
+        elif overwrite:
+            tracker.reset()
 
         # Update trading days for the specified month
         trading_days = self.calendar.load_trading_days(year, month)
@@ -755,60 +773,75 @@ class UploadApp:
         # Producer: Bulk fetch and parse
         pbar = tqdm(total=total_tasks, desc=f"Uploading {year}-{month:02d} minute", unit="task")
         try:
-            for i in range(0, total_symbols, chunk_size):
-                chunk = alpaca_symbols[i:i + chunk_size]
+            with tracker:
+                for i in range(0, total_symbols, chunk_size):
+                    chunk = alpaca_symbols[i:i + chunk_size]
 
-                # Pre-filter symbols that need data (skip if all days exist and overwrite=False)
-                if not overwrite:
-                    symbols_to_fetch = []
-                    for sym in chunk:
-                        # Check if any day is missing for this symbol
-                        needs_fetch = False
-                        for day in trading_days:
-                            if not self.validator.data_exists(sym, 'ticks', day=day):
-                                needs_fetch = True
-                                break
-                        if needs_fetch:
-                            symbols_to_fetch.append(sym)
-                        else:
-                            # All days exist, mark them all as canceled
-                            canceled_count = len(trading_days)
+                    # Pre-filter symbols that need data (skip if all days exist and overwrite=False)
+                    if not overwrite:
+                        symbols_to_fetch = []
+                        for sym in chunk:
+                            # Resolve security_id using first trading day
+                            try:
+                                security_id = self.security_master.get_security_id(sym, trading_days[0])
+                            except ValueError:
+                                # Symbol not active on this date, let worker handle per-day resolution
+                                symbols_to_fetch.append(sym)
+                                continue
+
+                            if security_id is None:
+                                # Can't resolve security_id, need to fetch
+                                symbols_to_fetch.append(sym)
+                                continue
+
+                            # Check if any day is missing for this symbol
+                            needs_fetch = False
+                            for day in trading_days:
+                                if not self.validator.data_exists(sym, 'ticks', day=day, security_id=security_id):
+                                    needs_fetch = True
+                                    break
+                            if needs_fetch:
+                                symbols_to_fetch.append(sym)
+                            else:
+                                # All days exist, mark symbol as verified-complete
+                                tracker.mark_completed(sym)
+                                canceled_count = len(trading_days)
+                                with stats_lock:
+                                    stats['canceled'] += canceled_count
+                                    stats['completed'] += canceled_count
+                                pbar.update(canceled_count)
+
+                        pbar.set_postfix(ok=stats['success'], fail=stats['failed'], skip=stats['skipped'], cancel=stats['canceled'])
+                        if not symbols_to_fetch:
+                            continue
+                        chunk = symbols_to_fetch
+
+                    # Bulk fetch for the month
+                    start = time.perf_counter()
+                    symbol_bars = self.data_collectors.fetch_minute_month(chunk, year, month, sleep_time=sleep_time)
+                    self.logger.debug(f"fetch_minute_month: {time.perf_counter()-start:.2f}s")
+
+                    # Parse and organize by (symbol, day) using DataCollectors
+                    start = time.perf_counter()
+                    parsed_data = self.data_collectors.parse_minute_bars_to_daily(symbol_bars, trading_days)
+                    self.logger.debug(f"parse_minute_bars_to_daily: {time.perf_counter()-start:.2f}s")
+
+                    # Put parsed data into queue for upload
+                    for (sym, day), minute_df in parsed_data.items():
+                        # Check if data is empty and update stats accordingly
+                        if len(minute_df) == 0:
                             with stats_lock:
-                                stats['canceled'] += canceled_count
-                                stats['completed'] += canceled_count
-                            pbar.update(canceled_count)
+                                stats['skipped'] += 1
+                                stats['completed'] += 1
+                            pbar.update(1)
+                        else:
+                            # Put in queue for upload
+                            data_queue.put((sym, day, minute_df))
+                            with stats_lock:
+                                stats['completed'] += 1
+                            pbar.update(1)
 
-                    pbar.set_postfix(ok=stats['success'], fail=stats['failed'], skip=stats['skipped'], cancel=stats['canceled'])
-                    if not symbols_to_fetch:
-                        continue
-                    chunk = symbols_to_fetch
-
-                # Bulk fetch for the month
-                start = time.perf_counter()
-                symbol_bars = self.data_collectors.fetch_minute_month(chunk, year, month, sleep_time=sleep_time)
-                self.logger.debug(f"fetch_minute_month: {time.perf_counter()-start:.2f}s")
-
-                # Parse and organize by (symbol, day) using DataCollectors
-                start = time.perf_counter()
-                parsed_data = self.data_collectors.parse_minute_bars_to_daily(symbol_bars, trading_days)
-                self.logger.debug(f"parse_minute_bars_to_daily: {time.perf_counter()-start:.2f}s")
-
-                # Put parsed data into queue for upload
-                for (sym, day), minute_df in parsed_data.items():
-                    # Check if data is empty and update stats accordingly
-                    if len(minute_df) == 0:
-                        with stats_lock:
-                            stats['skipped'] += 1
-                            stats['completed'] += 1
-                        pbar.update(1)
-                    else:
-                        # Put in queue for upload
-                        data_queue.put((sym, day, minute_df))
-                        with stats_lock:
-                            stats['completed'] += 1
-                        pbar.update(1)
-
-                    pbar.set_postfix(ok=stats['success'], fail=stats['failed'], skip=stats['skipped'], cancel=stats['canceled'])
+                        pbar.set_postfix(ok=stats['success'], fail=stats['failed'], skip=stats['skipped'], cancel=stats['canceled'])
         except Exception as e:
             self.logger.error(f"Error in bulk fetch/parse: {e}", exc_info=True)
 
@@ -1484,6 +1517,7 @@ class UploadApp:
             end_year: int,
             max_workers: int=50,
             overwrite: bool=False,
+            resume: bool=False,
             chunk_size: int=30,
             sleep_time: float=0.02,
             daily_chunk_size: int=200,
@@ -1511,6 +1545,7 @@ class UploadApp:
         :param end_year: Ending year (inclusive)
         :param max_workers: Number of concurrent workers
         :param overwrite: If True, overwrite existing data
+        :param resume: If True, skip already-completed symbols (for minute ticks)
         :param chunk_size: Number of symbols to fetch at once for minute data
         :param sleep_time: Sleep time between API requests
         :param run_fundamental: If True, upload raw fundamental data
@@ -1590,7 +1625,7 @@ class UploadApp:
                     self.logger.info(f"Uploading minute ticks for {year} (all 12 months)")
                     for month in range(1, 13):
                         self.logger.info(f"Processing minute ticks for {year}-{month:02d}")
-                        self.upload_minute_ticks(year, month, overwrite, max_workers, chunk_size, sleep_time)
+                        self.upload_minute_ticks(year, month, overwrite=overwrite, resume=resume, num_workers=max_workers, chunk_size=chunk_size, sleep_time=sleep_time)
                 else:
                     self.logger.info(f"Skipping minute ticks for {year} (data only available from 2017+)")
 

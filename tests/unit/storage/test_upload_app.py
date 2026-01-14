@@ -11,6 +11,7 @@ import logging
 import queue
 import threading
 import polars as pl
+from botocore.exceptions import ClientError
 
 
 def _make_app():
@@ -18,6 +19,10 @@ def _make_app():
 
     app = UploadApp.__new__(UploadApp)
     app.logger = Mock()
+    # Mock S3 client - simulate no progress file exists (fresh start)
+    app.client = Mock()
+    error_response = {'Error': {'Code': 'NoSuchKey', 'Message': 'Not Found'}}
+    app.client.get_object.side_effect = ClientError(error_response, 'GetObject')
     app.validator = Mock()
     app.data_collectors = Mock()
     app.data_publishers = Mock()
