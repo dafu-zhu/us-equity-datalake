@@ -1975,3 +1975,109 @@ class TestCollectDailyTicksYearBulkAdvanced:
         # Check that "... and X more" message was logged
         more_message_calls = [call for call in mock_logger_instance.warning.call_args_list if '... and' in str(call)]
         assert len(more_message_calls) >= 1
+
+
+class TestCRSPDailyTicksBulkHistory:
+    """Test collect_daily_ticks_full_history_bulk method"""
+
+    @patch('quantdl.collection.crsp_ticks.SecurityMaster')
+    @patch('quantdl.collection.crsp_ticks.setup_logger')
+    def test_collect_daily_ticks_full_history_bulk_success(self, mock_logger, mock_security_master):
+        """Test bulk history collection with valid permnos."""
+        mock_conn = Mock()
+        mock_logger.return_value = Mock()
+        mock_security_master.return_value = Mock()
+
+        # Mock SQL result
+        mock_conn.raw_sql.return_value = pd.DataFrame({
+            "permno": [10516, 10516, 10517],
+            "date": [pd.Timestamp("2020-01-02"), pd.Timestamp("2020-01-03"), pd.Timestamp("2020-01-02")],
+            "open": [100.0, 101.0, 50.0],
+            "high": [105.0, 106.0, 55.0],
+            "low": [99.0, 100.0, 49.0],
+            "close": [103.0, 104.0, 53.0],
+            "volume": [1000000, 1100000, 500000]
+        })
+
+        crsp = CRSPDailyTicks(conn=mock_conn)
+        result = crsp.collect_daily_ticks_full_history_bulk(
+            permnos=[10516, 10517],
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+
+        assert 10516 in result
+        assert 10517 in result
+        assert len(result[10516]) == 2
+        assert len(result[10517]) == 1
+
+    @patch('quantdl.collection.crsp_ticks.SecurityMaster')
+    @patch('quantdl.collection.crsp_ticks.setup_logger')
+    def test_collect_daily_ticks_full_history_bulk_empty_result(self, mock_logger, mock_security_master):
+        """Test bulk history collection returns empty dict for empty result (lines 471, 509-511)."""
+        mock_conn = Mock()
+        mock_logger.return_value = Mock()
+        mock_security_master.return_value = Mock()
+
+        # Mock empty SQL result
+        mock_conn.raw_sql.return_value = pd.DataFrame()
+
+        crsp = CRSPDailyTicks(conn=mock_conn)
+        result = crsp.collect_daily_ticks_full_history_bulk(
+            permnos=[10516],
+            start_date='2020-01-01',
+            end_date='2020-12-31'
+        )
+
+        assert result == {}
+
+    @patch('quantdl.collection.crsp_ticks.SecurityMaster')
+    @patch('quantdl.collection.crsp_ticks.setup_logger')
+    def test_collect_daily_ticks_full_history_bulk_chunking(self, mock_logger, mock_security_master):
+        """Test bulk history collection chunks large permno lists."""
+        mock_conn = Mock()
+        mock_logger.return_value = Mock()
+        mock_security_master.return_value = Mock()
+
+        # Mock SQL result
+        mock_conn.raw_sql.return_value = pd.DataFrame({
+            "permno": [1, 2],
+            "date": [pd.Timestamp("2020-01-02"), pd.Timestamp("2020-01-02")],
+            "open": [100.0, 50.0],
+            "high": [105.0, 55.0],
+            "low": [99.0, 49.0],
+            "close": [103.0, 53.0],
+            "volume": [1000000, 500000]
+        })
+
+        crsp = CRSPDailyTicks(conn=mock_conn)
+        result = crsp.collect_daily_ticks_full_history_bulk(
+            permnos=list(range(1, 101)),  # 100 permnos
+            start_date='2020-01-01',
+            end_date='2020-12-31',
+            chunk_size=50
+        )
+
+        # Should be called twice (100 permnos / 50 chunk_size)
+        assert mock_conn.raw_sql.call_count == 2
+
+    @patch('quantdl.collection.crsp_ticks.SecurityMaster')
+    @patch('quantdl.collection.crsp_ticks.setup_logger')
+    def test_collect_daily_ticks_empty_result(self, mock_logger, mock_security_master):
+        """Test collect_daily_ticks handles empty SQL result (line 668)."""
+        mock_conn = Mock()
+        mock_logger.return_value = Mock()
+        mock_sm_instance = Mock()
+        mock_sm_instance.get_permno.return_value = 10516
+        mock_sm_instance.get_security_id.return_value = 1001
+        mock_sm_instance.sid_to_permno.return_value = 10516
+        mock_security_master.return_value = mock_sm_instance
+
+        # Mock empty SQL result
+        mock_conn.raw_sql.return_value = pd.DataFrame()
+
+        crsp = CRSPDailyTicks(conn=mock_conn)
+        # Use correct signature: symbol, year (int), month (int)
+        result = crsp.collect_daily_ticks('AAPL', 2020, 1)
+
+        assert result == []

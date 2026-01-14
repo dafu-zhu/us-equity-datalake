@@ -1143,6 +1143,93 @@ class TestDailyUpdateAppNoWRDSRunDailyUpdate:
         # Fundamental update should NOT be called
         app.update_fundamental.assert_not_called()
 
+    def test_get_cik_returns_none_for_empty_sec_map(self):
+        """Test SimpleCIKResolver returns None when SEC map empty (line 101)."""
+        from quantdl.update.app_no_wrds import SimpleCIKResolver
+
+        resolver = SimpleCIKResolver(logger=Mock())
+        resolver._fetch_sec_mapping = Mock(return_value=pl.DataFrame())
+
+        result = resolver.get_cik('AAPL')
+        assert result is None
+
+    def test_batch_prefetch_ciks_returns_none_for_empty_sec_map(self):
+        """Test batch_prefetch_ciks returns None for all symbols when SEC map empty (line 119)."""
+        from quantdl.update.app_no_wrds import SimpleCIKResolver
+
+        resolver = SimpleCIKResolver(logger=Mock())
+        resolver._fetch_sec_mapping = Mock(return_value=pl.DataFrame())
+
+        result = resolver.batch_prefetch_ciks(['AAPL', 'MSFT'])
+        assert result == {'AAPL': None, 'MSFT': None}
+
+    @patch('quantdl.update.app_no_wrds.TradingCalendar')
+    @patch('quantdl.update.app_no_wrds.SecurityMaster')
+    @patch('quantdl.update.app_no_wrds.S3Client')
+    @patch('quantdl.update.app_no_wrds.UploadConfig')
+    @patch('quantdl.update.app_no_wrds.Ticks')
+    @patch('quantdl.update.app_no_wrds.setup_logger')
+    def test_get_recent_edgar_filings_request_exception(
+        self, mock_logger, mock_ticks, mock_config, mock_s3, mock_security_master, mock_calendar
+    ):
+        """Test get_recent_edgar_filings handles RequestException (lines 264,265)."""
+        from quantdl.update.app_no_wrds import DailyUpdateAppNoWRDS
+        import requests
+
+        app = DailyUpdateAppNoWRDS()
+        app.sec_rate_limiter = Mock()
+
+        with patch('quantdl.update.app_no_wrds.requests.get', side_effect=requests.RequestException("Connection error")):
+            result = app.get_recent_edgar_filings('0000320193', lookback_days=7)
+
+        assert result == []
+
+    @patch('quantdl.update.app_no_wrds.TradingCalendar')
+    @patch('quantdl.update.app_no_wrds.SecurityMaster')
+    @patch('quantdl.update.app_no_wrds.S3Client')
+    @patch('quantdl.update.app_no_wrds.UploadConfig')
+    @patch('quantdl.update.app_no_wrds.Ticks')
+    @patch('quantdl.update.app_no_wrds.setup_logger')
+    def test_update_daily_ticks_skipped_no_data(
+        self, mock_logger, mock_ticks, mock_config, mock_s3, mock_security_master, mock_calendar
+    ):
+        """Test update_daily_ticks skipped when no data (lines 403,404)."""
+        from quantdl.update.app_no_wrds import DailyUpdateAppNoWRDS
+
+        app = DailyUpdateAppNoWRDS()
+        app.security_master.get_security_id = Mock(return_value=1001)
+        app.alpaca_ticks.fetch_daily_day_bulk = Mock(return_value={'AAPL': []})
+        app._get_symbols = Mock(return_value=['AAPL'])
+
+        stats = app.update_daily_ticks(update_date=dt.date(2025, 1, 10))
+
+        assert stats['skipped'] >= 1
+
+    @patch('quantdl.update.app_no_wrds.TradingCalendar')
+    @patch('quantdl.update.app_no_wrds.SecurityMaster')
+    @patch('quantdl.update.app_no_wrds.S3Client')
+    @patch('quantdl.update.app_no_wrds.UploadConfig')
+    @patch('quantdl.update.app_no_wrds.Ticks')
+    @patch('quantdl.update.app_no_wrds.setup_logger')
+    def test_update_fundamental_failed_result(
+        self, mock_logger, mock_ticks, mock_config, mock_s3, mock_security_master, mock_calendar
+    ):
+        """Test update_fundamental counts failed results (lines 610,611)."""
+        from quantdl.update.app_no_wrds import DailyUpdateAppNoWRDS
+
+        app = DailyUpdateAppNoWRDS()
+        app.cik_resolver = Mock()
+        app.cik_resolver.get_cik.return_value = '0000320193'
+        app.data_publishers.publish_fundamental = Mock(return_value={'status': 'failed', 'error': 'API error'})
+
+        stats = app.update_fundamental(
+            symbols=['AAPL'],
+            start_date='2024-01-01',
+            end_date='2024-12-31'
+        )
+
+        assert stats['failed'] == 1
+
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

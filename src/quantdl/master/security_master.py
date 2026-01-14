@@ -939,6 +939,7 @@ class SecurityMaster:
                     'security_id': max_sid,
                     'symbol': row['ticker'],
                     'company': row['title'],
+                    'permno': None,
                     'cik': row['cik'],
                     'cusip': None,
                     'start_date': today,

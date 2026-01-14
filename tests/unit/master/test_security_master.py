@@ -1691,3 +1691,152 @@ class TestSecurityMasterS3Operations:
         # Verify second lookup works too
         result2 = sm.sid_to_permno(102)
         assert result2 == 666
+
+
+class TestSecurityMasterSecOperations:
+    """Test SecurityMaster SEC operations"""
+
+    def test_fetch_sec_mapping_full(self):
+        """Test _fetch_sec_mapping_full fetches and parses SEC data."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            '0': {'cik_str': '320193', 'ticker': 'AAPL', 'title': 'Apple Inc'},
+            '1': {'cik_str': '1018724', 'ticker': 'AMZN', 'title': 'Amazon.com Inc'}
+        }
+
+        with patch('quantdl.master.security_master.requests.get', return_value=mock_response):
+            result = sm._fetch_sec_mapping_full()
+
+        assert len(result) == 2
+        assert 'ticker' in result.columns
+        assert 'cik' in result.columns
+        assert 'title' in result.columns
+
+    def test_auto_resolve_null_candidates_warning(self):
+        """Test auto_resolve raises error when security not active on query date (lines 651-652, 671)."""
+        # Create master_tb with valid security_ids and the symbol, but with
+        # date ranges that don't include the query date
+        master_tb = pl.DataFrame({
+            'security_id': [101, 102],
+            'symbol': ['AAA', 'AAA'],
+            'permno': [None, None],
+            'cik': [None, None],
+            'start_date': [dt.date(2019, 1, 1), dt.date(2021, 1, 1)],
+            'end_date': [dt.date(2019, 12, 31), dt.date(2021, 12, 31)]  # Neither covers 2020-06-30
+        })
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.master_tb = master_tb
+        sm.logger = Mock()
+
+        # auto_resolve should raise ValueError since no candidate is active on the query date
+        with pytest.raises(ValueError, match="was not active on"):
+            sm.auto_resolve('AAA', '2020-06-30')
+
+    def test_update_from_sec_extends_end_dates(self):
+        """Test update_from_sec extends end_dates for active securities."""
+        master_tb = pl.DataFrame({
+            'security_id': [101],
+            'symbol': ['AAPL'],
+            'company': ['Apple Inc'],
+            'permno': [555],
+            'cik': ['0000320193'],
+            'cusip': ['037833100'],
+            'start_date': [dt.date(2009, 1, 1)],
+            'end_date': [dt.date(2024, 12, 31)]  # Stale end_date
+        })
+
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.master_tb = master_tb
+        sm.logger = Mock()
+
+        sec_data = pl.DataFrame({
+            'ticker': ['AAPL'],
+            'cik': ['0000320193'],
+            'title': ['Apple Inc']
+        })
+
+        with patch.object(sm, '_fetch_sec_mapping_full', return_value=sec_data):
+            stats = sm.update_from_sec()
+
+        assert stats['extended'] == 1
+        assert stats['added'] == 0
+        assert stats['unchanged'] == 0
+
+        # Verify end_date was extended
+        updated_row = sm.master_tb.filter(pl.col('security_id') == 101)
+        assert updated_row['end_date'][0] > dt.date(2024, 12, 31)
+
+    def test_update_from_sec_adds_new_securities(self):
+        """Test update_from_sec adds new securities not in master_tb."""
+        master_tb = pl.DataFrame({
+            'security_id': [101],
+            'symbol': ['AAPL'],
+            'company': ['Apple Inc'],
+            'permno': [555],
+            'cik': ['0000320193'],
+            'cusip': ['037833100'],
+            'start_date': [dt.date(2009, 1, 1)],
+            'end_date': [dt.date(2024, 12, 31)]
+        })
+
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.master_tb = master_tb
+        sm.logger = Mock()
+
+        sec_data = pl.DataFrame({
+            'ticker': ['AAPL', 'NEWIPO'],
+            'cik': ['0000320193', '9999999999'],
+            'title': ['Apple Inc', 'New IPO Corp']
+        })
+
+        with patch.object(sm, '_fetch_sec_mapping_full', return_value=sec_data):
+            stats = sm.update_from_sec()
+
+        assert stats['added'] == 1
+        assert stats['extended'] == 1  # AAPL extended
+
+        # Verify new security was added
+        new_rows = sm.master_tb.filter(pl.col('cik') == '9999999999')
+        assert len(new_rows) == 1
+        assert new_rows['symbol'][0] == 'NEWIPO'
+
+    def test_update_from_sec_with_s3_export(self):
+        """Test update_from_sec exports to S3 when s3_client provided."""
+        master_tb = pl.DataFrame({
+            'security_id': [101],
+            'symbol': ['AAPL'],
+            'company': ['Apple Inc'],
+            'permno': [555],
+            'cik': ['0000320193'],
+            'cusip': ['037833100'],
+            'start_date': [dt.date(2009, 1, 1)],
+            'end_date': [dt.date(2024, 12, 31)]
+        })
+
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.master_tb = master_tb
+        sm.logger = Mock()
+        sm.CRSP_LATEST_DATE = '2024-12-31'
+
+        sec_data = pl.DataFrame({
+            'ticker': ['AAPL'],
+            'cik': ['0000320193'],
+            'title': ['Apple Inc']
+        })
+
+        mock_s3 = Mock()
+
+        with patch.object(sm, '_fetch_sec_mapping_full', return_value=sec_data):
+            stats = sm.update_from_sec(
+                s3_client=mock_s3,
+                bucket_name='test-bucket'
+            )
+
+        # export_to_s3 uses upload_fileobj, not put_object
+        mock_s3.upload_fileobj.assert_called_once()
+        call_args = mock_s3.upload_fileobj.call_args
+        assert call_args[0][1] == 'test-bucket'  # bucket_name
+        assert 'security_master.parquet' in call_args[0][2]  # s3_key

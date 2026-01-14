@@ -1346,3 +1346,25 @@ class TestFetchMinuteMonthBulkFallback:
         mock_logger.warning.assert_called()
         assert 'AAPL' in mock_logger.warning.call_args[0][0]
         mock_logger.error.assert_called()
+
+    @patch.dict('os.environ', {'ALPACA_API_KEY': 'test_key', 'ALPACA_API_SECRET': 'test_secret'})
+    @patch('quantdl.collection.alpaca_ticks.LoggerFactory')
+    def test_fetch_minute_pagination_error_handling(self, mock_logger_factory):
+        """Test pagination error handling (lines 558, 562)."""
+        mock_logger = Mock()
+        mock_logger_factory.return_value.get_logger.return_value = mock_logger
+
+        ticks = Ticks()
+
+        # Mock requests to fail during pagination
+        mock_response = Mock()
+        mock_response.json.side_effect = Exception("JSON parse error")
+        mock_response.status_code = 200
+
+        with patch('quantdl.collection.alpaca_ticks.requests.get', return_value=mock_response):
+            with pytest.raises(Exception):
+                ticks._fetch_minute_with_pagination(
+                    sym='AAPL',
+                    start='2024-01-02T14:30:00Z',
+                    end='2024-01-02T21:00:00Z'
+                )

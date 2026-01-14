@@ -237,3 +237,67 @@ class TestUploadProgressTracker:
         # Modifying returned stats shouldn't affect internal state
         stats['total'] = 999
         assert tracker._stats['total'] == 100
+
+    def test_load_already_loaded_returns_early(self):
+        """Test load returns early if already loaded (line 59)."""
+        mock_s3 = Mock()
+        progress_data = {
+            'completed': [1001],
+            'stats': {'total': 10, 'completed': 1, 'failed': 0, 'skipped': 0}
+        }
+        mock_s3.get_object.return_value = {
+            'Body': Mock(read=Mock(return_value=json.dumps(progress_data).encode()))
+        }
+
+        tracker = UploadProgressTracker(
+            s3_client=mock_s3,
+            bucket_name='test-bucket'
+        )
+
+        # First load
+        result1 = tracker.load()
+        assert result1 == {1001}
+
+        # Second load should return cached result without calling S3 again
+        result2 = tracker.load()
+        assert result2 == {1001}
+
+        # S3 get_object should only be called once
+        assert mock_s3.get_object.call_count == 1
+
+    def test_load_reraises_non_nosuchkey_error(self):
+        """Test load re-raises non-NoSuchKey ClientError (line 76)."""
+        mock_s3 = Mock()
+        error_response = {'Error': {'Code': 'AccessDenied', 'Message': 'Access Denied'}}
+        mock_s3.get_object.side_effect = ClientError(error_response, 'GetObject')
+
+        tracker = UploadProgressTracker(
+            s3_client=mock_s3,
+            bucket_name='test-bucket'
+        )
+
+        with pytest.raises(ClientError) as exc_info:
+            tracker.load()
+
+        assert exc_info.value.response['Error']['Code'] == 'AccessDenied'
+
+    def test_reset_handles_client_error_silently(self):
+        """Test reset handles ClientError during delete (lines 171,172)."""
+        mock_s3 = Mock()
+        error_response = {'Error': {'Code': 'NoSuchKey', 'Message': 'Not Found'}}
+        mock_s3.delete_object.side_effect = ClientError(error_response, 'DeleteObject')
+
+        tracker = UploadProgressTracker(
+            s3_client=mock_s3,
+            bucket_name='test-bucket'
+        )
+        tracker._completed = {1001, 1002}
+        tracker._stats = {'total': 10, 'completed': 2, 'failed': 0, 'skipped': 0}
+
+        # Should not raise, silently handles ClientError
+        tracker.reset()
+
+        # State should be reset
+        assert tracker._completed == set()
+        assert tracker._stats['completed'] == 0
+        assert tracker._loaded is True

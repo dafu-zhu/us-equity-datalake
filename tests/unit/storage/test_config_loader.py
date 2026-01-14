@@ -245,3 +245,20 @@ class TestUploadConfig:
 
         assert first_config is second_config
         assert client1 == client2
+
+    def test_client_property_raises_value_error_on_failed_load(self):
+        """Test that client property raises ValueError when config fails to load (line 44)."""
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+            f.write("")  # Empty file
+            temp_path = f.name
+
+        try:
+            config = UploadConfig(config_path=temp_path)
+            config.load()
+
+            # _config should be None after loading empty file
+            if config._config is None:
+                with pytest.raises(ValueError, match="Failed to load configuration"):
+                    _ = config.client
+        finally:
+            Path(temp_path).unlink(missing_ok=True)

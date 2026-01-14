@@ -1120,3 +1120,24 @@ class TestSECClientRateLimiter:
 
         # Verify rate limiter was called
         mock_rate_limiter.acquire.assert_called_once()
+
+
+class TestFundamentalExtractorEdgeCases:
+    """Test edge cases in FundamentalExtractor class"""
+
+    def test_extract_concept_raises_for_undefined_concept(self):
+        """Test extract_concept raises KeyError for undefined concept."""
+        from quantdl.collection.fundamental import extract_concept
+
+        facts = {'us-gaap': {}}
+
+        with pytest.raises(KeyError, match="not defined in MAPPINGS"):
+            extract_concept(facts, 'undefined_concept_xyz')
+
+    def test_extractor_normalize_duration_empty_input(self):
+        """Test FundamentalExtractor._normalize_duration_raw handles empty input."""
+        from quantdl.collection.fundamental import FundamentalExtractor
+
+        extractor = FundamentalExtractor()
+        result = extractor._normalize_duration_raw([])
+        assert result == []

@@ -953,3 +953,122 @@ class TestDataPublishers:
         assert metadata['latest_filing_date'] == '2024-10-31'  # Latest date
         assert metadata['latest_accn'] == '0000320193-24-000078'  # Accn for latest date
         assert result['status'] == 'success'
+
+    def test_publish_daily_ticks_history_reraises_non_nosuchkey_error(self):
+        """Test history file path re-raises non-NoSuchKey ClientError (lines 244,247,253)."""
+        from botocore.exceptions import ClientError
+
+        publisher, s3_client, _ = _make_publisher()
+
+        # Mock get_object to raise a different error (e.g., AccessDenied)
+        error_response = {'Error': {'Code': 'AccessDenied'}}
+        s3_client.get_object.side_effect = ClientError(error_response, 'GetObject')
+
+        df = pl.DataFrame({
+            "timestamp": ["2024-06-30"],
+            "open": [190.0],
+            "high": [195.0],
+            "low": [189.0],
+            "close": [193.0],
+            "volume": [50000000]
+        })
+
+        result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df, month=None, by_year=False)
+
+        # Should fail with error
+        assert result["status"] == "failed"
+
+    def test_publish_daily_ticks_request_exception(self):
+        """Test RequestException handling (lines 289,290)."""
+        publisher, s3_client, _ = _make_publisher()
+
+        s3_client.upload_fileobj.side_effect = requests.RequestException("Connection failed")
+
+        df = pl.DataFrame({
+            "timestamp": ["2024-06-30"],
+            "open": [190.0],
+            "high": [195.0],
+            "low": [189.0],
+            "close": [193.0],
+            "volume": [50000000]
+        })
+
+        result = publisher.publish_daily_ticks("AAPL", 2024, 12345, df, month=6, by_year=False)
+
+        assert result["status"] == "failed"
+        assert "Connection failed" in result["error"]
+
+    def test_publish_daily_ticks_to_history_success(self):
+        """Test publish_daily_ticks_to_history with valid data."""
+        publisher, s3_client, _ = _make_publisher()
+
+        df = pl.DataFrame({
+            "timestamp": ["2020-01-02", "2020-01-03", "2020-01-06"],
+            "open": [100.0, 101.0, 102.0],
+            "high": [105.0, 106.0, 107.0],
+            "low": [99.0, 100.0, 101.0],
+            "close": [104.0, 105.0, 106.0],
+            "volume": [1000, 2000, 3000]
+        })
+
+        result = publisher.publish_daily_ticks_to_history(
+            security_id=1001,
+            df=df,
+            symbol="AAPL"
+        )
+
+        assert result["status"] == "success"
+        assert result["security_id"] == 1001
+        s3_client.upload_fileobj.assert_called_once()
+
+        # Verify path
+        call_args = s3_client.upload_fileobj.call_args
+        assert "data/raw/ticks/daily/1001/history.parquet" in call_args.kwargs["Key"]
+
+    def test_publish_daily_ticks_to_history_empty_df(self):
+        """Test publish_daily_ticks_to_history with empty DataFrame."""
+        publisher, s3_client, _ = _make_publisher()
+
+        df = pl.DataFrame({
+            "timestamp": [],
+            "open": [],
+            "high": [],
+            "low": [],
+            "close": [],
+            "volume": []
+        }).cast({"timestamp": pl.Utf8, "open": pl.Float64, "high": pl.Float64,
+                 "low": pl.Float64, "close": pl.Float64, "volume": pl.Int64})
+
+        result = publisher.publish_daily_ticks_to_history(
+            security_id=1001,
+            df=df,
+            symbol="AAPL"
+        )
+
+        assert result["status"] == "skipped"
+        assert "No data available" in result["error"]
+        s3_client.upload_fileobj.assert_not_called()
+
+    def test_publish_daily_ticks_to_history_error(self):
+        """Test publish_daily_ticks_to_history with upload error."""
+        publisher, s3_client, _ = _make_publisher()
+
+        s3_client.upload_fileobj.side_effect = Exception("Upload failed")
+
+        df = pl.DataFrame({
+            "timestamp": ["2020-01-02"],
+            "open": [100.0],
+            "high": [105.0],
+            "low": [99.0],
+            "close": [104.0],
+            "volume": [1000]
+        })
+
+        result = publisher.publish_daily_ticks_to_history(
+            security_id=1001,
+            df=df,
+            symbol="AAPL"
+        )
+
+        assert result["status"] == "failed"
+        assert "Upload failed" in result["error"]

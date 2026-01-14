@@ -2156,3 +2156,57 @@ class TestDataCollectorInheritance:
 
         assert isinstance(collector, DataCollector)
         assert hasattr(collector, 'logger')
+
+
+class TestFundamentalDataCollectorCaching:
+    """Test FundamentalDataCollector caching behavior"""
+
+    def test_fundamental_cache_race_condition(self):
+        """Test cache returns existing entry on race condition (lines 466,467)."""
+        from quantdl.storage.data_collectors import FundamentalDataCollector
+
+        mock_logger = Mock(spec=logging.Logger)
+        collector = FundamentalDataCollector(
+            logger=mock_logger,
+            sec_rate_limiter=Mock()
+        )
+
+        # Pre-populate cache to simulate race condition
+        mock_fundamental = Mock()
+        collector._fundamental_cache['0000320193'] = mock_fundamental
+
+        # Now try to get the same CIK - should return cached value
+        with patch('quantdl.storage.data_collectors.Fundamental') as MockFundamental:
+            MockFundamental.return_value = Mock()
+            result = collector._get_or_create_fundamental('0000320193', 'AAPL')
+
+        # Should return the cached entry
+        assert result == mock_fundamental
+        MockFundamental.assert_not_called()
+
+    def test_ttm_long_empty_stock_long_handling(self):
+        """Test collect_ttm_long_range handles empty stock_long DataFrame (lines 751-754)."""
+        from quantdl.storage.data_collectors import FundamentalDataCollector
+
+        mock_logger = Mock(spec=logging.Logger)
+        collector = FundamentalDataCollector(
+            logger=mock_logger,
+            sec_rate_limiter=Mock()
+        )
+
+        # Mock _get_or_create_fundamental to return a mock Fundamental
+        mock_fundamental = Mock()
+        mock_fundamental.get_concept_data.return_value = []
+
+        with patch.object(collector, '_get_or_create_fundamental', return_value=mock_fundamental):
+            with patch.object(collector, '_load_concepts', return_value=['rev', 'assets', 'shares_out']):
+                result = collector.collect_ttm_long_range(
+                    cik='0000320193',
+                    start_date='2024-01-01',
+                    end_date='2024-12-31',
+                    symbol='AAPL'
+                )
+
+        # Should return empty DataFrame without error
+        assert isinstance(result, pl.DataFrame)
+        assert len(result) == 0

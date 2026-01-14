@@ -1784,3 +1784,173 @@ class TestUploadApp:
         app.upload_daily_ticks.assert_called_once()
         app.upload_minute_ticks.assert_called_once()
         app.data_publishers.publish_top_3000_list.assert_called_once()
+
+    def test_publish_single_daily_ticks_symbol_not_active(self):
+        """Test _publish_single_daily_ticks skips when symbol not active in year (lines 151,153)."""
+        app = _make_app()
+        app.crsp_ticks.security_master.get_security_id.side_effect = ValueError("not active")
+
+        result = app._publish_single_daily_ticks("OLDSTOCK", 2020, overwrite=False)
+
+        assert result["status"] == "skipped"
+        assert "not active" in result["error"]
+
+    def test_upload_daily_ticks_wrds_not_available_for_historical(self):
+        """Test RuntimeError when WRDS unavailable for years < 2025 (line 403)."""
+        app = _make_app()
+        app._wrds_available = False
+
+        with pytest.raises(RuntimeError, match="WRDS connection required"):
+            app.upload_daily_ticks(2024, use_monthly_partitions=False)
+
+    def test_upload_daily_ticks_security_id_none_pre_resolution(self):
+        """Test symbol skipped when security_id is None during pre-resolution (lines 434-435)."""
+        app = _make_app()
+        app.universe_manager.load_symbols_for_year.return_value = ["AAPL", "BADSTOCK"]
+        # Return valid for AAPL, then error for BADSTOCK
+        def sid_side_effect(sym, date, auto_resolve=True):
+            if sym == "AAPL":
+                return 1001
+            raise ValueError("not found")
+        app.crsp_ticks.security_master.get_security_id.side_effect = sid_side_effect
+        app.validator.data_exists.return_value = False
+        df = pl.DataFrame({
+            "timestamp": ["2024-01-02"],
+            "open": [100.0],
+            "high": [105.0],
+            "low": [99.0],
+            "close": [103.0],
+            "volume": [1000]
+        })
+        app.data_collectors.collect_daily_ticks_month.return_value = df
+        app.data_publishers.publish_daily_ticks.return_value = {"status": "success"}
+
+        app.upload_daily_ticks(2024, use_monthly_partitions=True, current_year=2024)
+
+        # BADSTOCK should have security_id=None, leading to skipped count
+
+    def test_upload_daily_ticks_alpaca_monthly_security_id_none(self):
+        """Test Alpaca monthly path skips symbols with None security_id (lines 468-472, 477)."""
+        app = _make_app()
+        app.data_collectors.ticks_collector.alpaca_start_year = 2025
+        app.universe_manager.load_symbols_for_year.return_value = ["AAPL", "BADSTOCK"]
+        app.crsp_ticks.security_master.get_security_id.side_effect = [1001, ValueError("not found")]
+        app.validator.data_exists.return_value = False
+        app.data_collectors.collect_daily_ticks_month_bulk.return_value = {
+            "AAPL": pl.DataFrame({"timestamp": ["2025-01-02"], "open": [1], "high": [1], "low": [1], "close": [1], "volume": [1]})
+        }
+        app.data_publishers.publish_daily_ticks.return_value = {"status": "success"}
+
+        app.upload_daily_ticks(2025, use_monthly_partitions=True, by_year=False, chunk_size=10, current_year=2025)
+
+        # BADSTOCK should be skipped
+
+    def test_upload_daily_ticks_alpaca_monthly_skipped_status(self):
+        """Test Alpaca monthly path counts skipped status (lines 502, 504)."""
+        app = _make_app()
+        app.data_collectors.ticks_collector.alpaca_start_year = 2025
+        app.universe_manager.load_symbols_for_year.return_value = ["AAPL"]
+        app.validator.data_exists.return_value = False
+        app.data_collectors.collect_daily_ticks_month_bulk.return_value = {
+            "AAPL": pl.DataFrame({"timestamp": ["2025-01-02"], "open": [1], "high": [1], "low": [1], "close": [1], "volume": [1]})
+        }
+        app.data_publishers.publish_daily_ticks.return_value = {"status": "skipped"}
+
+        app.upload_daily_ticks(2025, use_monthly_partitions=True, by_year=False, chunk_size=1, current_year=2025)
+
+        info_calls = [str(call) for call in app.logger.info.call_args_list]
+        assert any("skipped" in c for c in info_calls)
+
+    def test_upload_daily_ticks_by_year_security_id_none(self):
+        """Test by_year path skips symbols with None security_id (lines 536-539)."""
+        app = _make_app()
+        app.data_collectors.ticks_collector.alpaca_start_year = 2025
+        app.universe_manager.load_symbols_for_year.return_value = ["AAPL", "BADSTOCK"]
+        app.crsp_ticks.security_master.get_security_id.side_effect = [1001, ValueError("not found")]
+        app.validator.data_exists.return_value = False
+        app.data_collectors.collect_daily_ticks_year_bulk.return_value = {}
+        app.data_publishers.publish_daily_ticks.return_value = {"status": "success"}
+
+        app.upload_daily_ticks(2024, use_monthly_partitions=True, by_year=True, current_year=2024)
+
+        # BADSTOCK should be skipped
+
+    def test_upload_daily_ticks_by_year_status_counting(self):
+        """Test by_year path counts all status types (lines 568-573)."""
+        app = _make_app()
+        app.data_collectors.ticks_collector.alpaca_start_year = 2025
+        app.universe_manager.load_symbols_for_year.return_value = ["A", "B", "C", "D"]
+        app.validator.data_exists.return_value = False
+        app.data_collectors.collect_daily_ticks_year_bulk.return_value = {}
+        app.data_publishers.publish_daily_ticks.side_effect = [
+            {"status": "success"},
+            {"status": "canceled"},
+            {"status": "skipped"},
+            {"status": "failed"}
+        ]
+
+        app.upload_daily_ticks(2024, use_monthly_partitions=True, by_year=True, current_year=2024)
+
+        info_calls = [str(call) for call in app.logger.info.call_args_list]
+        assert any("1 failed" in c and "1 success" in c for c in info_calls)
+
+    def test_upload_daily_ticks_monthly_crsp_status_counting(self):
+        """Test monthly CRSP path counts all status types (lines 603-608)."""
+        app = _make_app()
+        app.data_collectors.ticks_collector.alpaca_start_year = 2025
+        app.universe_manager.load_symbols_for_year.return_value = ["A", "B", "C"]
+        app.validator.data_exists.return_value = False
+        # Need to return values for 3 symbols * 12 months = 36 calls
+        app._publish_single_daily_ticks = Mock(side_effect=[
+            {"status": "success"} if i % 3 == 0 else
+            {"status": "canceled"} if i % 3 == 1 else
+            {"status": "failed"}
+            for i in range(36)
+        ])
+
+        app.upload_daily_ticks(2024, use_monthly_partitions=True, by_year=False, current_year=2024)
+
+        assert app._publish_single_daily_ticks.call_count >= 3
+
+    def test_upload_ttm_empty_year_symbols_skip(self):
+        """Test TTM upload skips empty year_symbols (line 1165)."""
+        app = _make_app()
+        app.universe_manager.load_symbols_for_year.side_effect = [[], ["AAPL"]]
+        app.cik_resolver.batch_prefetch_ciks.return_value = {"AAPL": "0000320193"}
+        app._process_symbol_ttm_fundamental = Mock(return_value={"status": "success"})
+
+        future = Mock()
+        future.result.return_value = {"status": "success"}
+
+        executor = Mock()
+        executor.__enter__ = Mock(return_value=executor)
+        executor.__exit__ = Mock(return_value=False)
+        executor.submit = Mock(return_value=future)
+
+        with patch('quantdl.storage.app.ThreadPoolExecutor', return_value=executor):
+            with patch('quantdl.storage.app.as_completed', return_value=[future]):
+                app.upload_ttm_fundamental("2024-01-01", "2025-12-31", max_workers=1, overwrite=False)
+
+    def test_run_all_flag_sets_all_uploads(self):
+        """Test run_all=True sets all upload flags (lines 1527-1532)."""
+        app = _make_app()
+        app.upload_fundamental = Mock()
+        app.upload_derived_fundamental = Mock()
+        app.upload_ttm_fundamental = Mock()
+        app._upload_crsp_bulk_history = Mock()
+        app.upload_daily_ticks = Mock()
+        app.upload_minute_ticks = Mock()
+        app.upload_top_3000_monthly = Mock()
+
+        app.run(
+            start_year=2024,
+            end_year=2024,
+            max_workers=1,
+            overwrite=False,
+            run_all=True
+        )
+
+        app.upload_fundamental.assert_called_once()
+        app.upload_derived_fundamental.assert_called_once()
+        app.upload_ttm_fundamental.assert_called_once()
+        app.upload_top_3000_monthly.assert_called_once()
