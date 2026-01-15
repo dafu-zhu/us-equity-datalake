@@ -901,6 +901,8 @@ class UploadApp:
                     parsed_data = self.data_collectors.parse_minute_bars_to_daily(symbol_bars, trading_days)
 
                     # Put parsed data into queue for upload
+                    # Track symbols that actually have data to upload
+                    symbols_with_data = set()
                     for (sym, day), minute_df in parsed_data.items():
                         if len(minute_df) == 0:
                             with stats_lock:
@@ -908,6 +910,7 @@ class UploadApp:
                                 stats['completed'] += 1
                             pbar.update(1)
                         else:
+                            symbols_with_data.add(sym)
                             data_queue.put((sym, day, minute_df))
                             with stats_lock:
                                 stats['completed'] += 1
@@ -915,8 +918,8 @@ class UploadApp:
 
                         pbar.set_postfix(ok=stats['success'], fail=stats['failed'], skip=stats['skipped'], cancel=stats['canceled'])
 
-                    # Mark fetched symbols as completed
-                    for sym in chunk:
+                    # Only mark symbols as completed if they had actual data
+                    for sym in symbols_with_data:
                         tracker.mark_completed(sym)
         except Exception as e:
             self.logger.error(f"Error in {year}-{month:02d}: {e}", exc_info=True)

@@ -631,6 +631,14 @@ class Ticks:
         """
         start_str, end_str = self._get_month_range(year, month)
 
+        # Cap end date at yesterday to avoid requesting future data
+        yesterday = dt.date.today() - dt.timedelta(days=1)
+        end_date = dt.datetime.fromisoformat(end_str.replace('Z', '+00:00')).date()
+        if end_date > yesterday:
+            end_str = dt.datetime.combine(
+                yesterday, dt.time(23, 59, 59), tzinfo=dt.timezone.utc
+            ).isoformat().replace("+00:00", "Z")
+
         params = {
             "symbols": symbol,
             "timeframe": "1Min",
@@ -680,6 +688,15 @@ class Ticks:
         :return: Dict mapping symbol -> list of bars
         """
         start_str, end_str = self._get_month_range(year, month)
+
+        # Cap end date at yesterday to avoid requesting future data
+        yesterday = dt.date.today() - dt.timedelta(days=1)
+        end_date = dt.datetime.fromisoformat(end_str.replace('Z', '+00:00')).date()
+        if end_date > yesterday:
+            end_str = dt.datetime.combine(
+                yesterday, dt.time(23, 59, 59), tzinfo=dt.timezone.utc
+            ).isoformat().replace("+00:00", "Z")
+
         period_desc = f"{year}-{month:02d}"
 
         # Try bulk fetch with retry logic
