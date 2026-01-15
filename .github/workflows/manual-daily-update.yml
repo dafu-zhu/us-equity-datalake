@@ -12,10 +12,40 @@ on:
         required: false
         type: string
       no_ticks:
-        description: 'Skip ticks updates (only update fundamentals)'
+        description: 'Skip ALL ticks (daily + minute)'
         required: false
         type: boolean
         default: false
+      no_daily_ticks:
+        description: 'Skip daily ticks only'
+        required: false
+        type: boolean
+        default: false
+      no_minute_ticks:
+        description: 'Skip minute ticks only'
+        required: false
+        type: boolean
+        default: false
+      no_fundamental:
+        description: 'Skip raw fundamental update'
+        required: false
+        type: boolean
+        default: false
+      no_ttm:
+        description: 'Skip TTM fundamental update'
+        required: false
+        type: boolean
+        default: false
+      no_derived:
+        description: 'Skip derived metrics update'
+        required: false
+        type: boolean
+        default: false
+      lookback:
+        description: 'EDGAR filings lookback days (default: 7)'
+        required: false
+        type: string
+        default: '7'
 
 permissions:
   contents: read
@@ -60,6 +90,24 @@ jobs:
           fi
           if [ "${{ github.event.inputs.no_ticks }}" = "true" ]; then
             CMD="$CMD --no-ticks"
+          fi
+          if [ "${{ github.event.inputs.no_daily_ticks }}" = "true" ]; then
+            CMD="$CMD --no-daily-ticks"
+          fi
+          if [ "${{ github.event.inputs.no_minute_ticks }}" = "true" ]; then
+            CMD="$CMD --no-minute-ticks"
+          fi
+          if [ "${{ github.event.inputs.no_fundamental }}" = "true" ]; then
+            CMD="$CMD --no-fundamental"
+          fi
+          if [ "${{ github.event.inputs.no_ttm }}" = "true" ]; then
+            CMD="$CMD --no-ttm"
+          fi
+          if [ "${{ github.event.inputs.no_derived }}" = "true" ]; then
+            CMD="$CMD --no-derived"
+          fi
+          if [ "${{ github.event.inputs.lookback }}" != "7" ]; then
+            CMD="$CMD --lookback ${{ github.event.inputs.lookback }}"
           fi
           echo "command=$CMD" >> $GITHUB_OUTPUT
           echo "Running: $CMD"
