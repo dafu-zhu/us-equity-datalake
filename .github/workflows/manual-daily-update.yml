@@ -1,4 +1,4 @@
-name: Test Daily Update
+name: Manual Daily Update
 
 on:
   workflow_dispatch:  # Manual trigger only
@@ -34,7 +34,7 @@ jobs:
           echo "MAIL_SERVER: ${{ secrets.MAIL_SERVER != '' && 'SET' || 'MISSING' }}"
           echo "MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD != '' && 'SET' || 'MISSING' }}"
 
-      - name: Run daily update with --no-ticks (faster test, WRDS-free)
+      - name: Run daily update with --no-ticks (faster, WRDS-free)
         env:
           ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
           ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
@@ -73,7 +73,7 @@ jobs:
             echo "EOF" >> $GITHUB_OUTPUT
           fi
 
-      - name: Send test email
+      - name: Send email
         if: always()
         uses: dawidd6/action-send-mail@v3
         with:
@@ -81,11 +81,11 @@ jobs:
           server_port: ${{ secrets.MAIL_PORT }}
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
-          subject: '[TEST] Daily Update Workflow Test'
+          subject: '[Manual] Daily Update Workflow'
           to: ${{ secrets.MAIL_TO }}
           from: ${{ secrets.MAIL_FROM }}
           body: |
-            Test run completed at ${{ github.event.repository.updated_at }}
+            Manual daily update run completed at ${{ github.event.repository.updated_at }}
 
             Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
