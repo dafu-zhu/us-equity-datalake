@@ -15,6 +15,7 @@ import datetime as dt
 from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 import requests
 import polars as pl
 from dotenv import load_dotenv
@@ -476,7 +477,8 @@ class DailyUpdateAppNoWRDS:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(process_symbol, sym): sym for sym in symbols}
 
-            for future in as_completed(futures):
+            pbar = tqdm(as_completed(futures), total=len(symbols), desc="Daily ticks", unit="sym")
+            for future in pbar:
                 result = future.result()
 
                 if result['status'] == 'success':
@@ -486,16 +488,10 @@ class DailyUpdateAppNoWRDS:
                 else:
                     stats['failed'] += 1
 
-                total_processed = stats['success'] + stats['failed'] + stats['skipped']
-                if total_processed % 100 == 0:
-                    self.logger.info(
-                        f"Progress: {total_processed}/{len(symbols)} "
-                        f"({stats['success']} success, {stats['failed']} failed, {stats['skipped']} skipped)"
-                    )
+                pbar.set_postfix(ok=stats['success'], fail=stats['failed'], skip=stats['skipped'])
 
         self.logger.info(
-            f"Daily ticks update completed: {stats['success']} success, "
-            f"{stats['failed']} failed, {stats['skipped']} skipped"
+            f"Daily ticks: {stats['success']} ok, {stats['failed']} fail, {stats['skipped']} skip"
         )
 
         return stats
@@ -533,13 +529,13 @@ class DailyUpdateAppNoWRDS:
         # Upload data
         stats = {'success': 0, 'failed': 0, 'skipped': 0}
 
-        self.logger.info(f"Uploading minute ticks for {len(parsed_data)} symbol-days...")
-
-        for (sym, day), minute_df in parsed_data.items():
+        pbar = tqdm(parsed_data.items(), desc="Minute ticks", unit="sym-day")
+        for (sym, day), minute_df in pbar:
             try:
                 if len(minute_df) == 0:
                     self.logger.debug(f"Skipping {sym} minute ticks for {day}: empty DataFrame")
                     stats['skipped'] += 1
+                    pbar.set_postfix(ok=stats['success'], fail=stats['failed'], skip=stats['skipped'])
                     continue
 
                 # Resolve symbol to security_id at trade day
@@ -570,9 +566,10 @@ class DailyUpdateAppNoWRDS:
                 self.logger.error(f"Error uploading minute ticks for {sym} on {day}: {e}")
                 stats['failed'] += 1
 
+            pbar.set_postfix(ok=stats['success'], fail=stats['failed'], skip=stats['skipped'])
+
         self.logger.info(
-            f"Minute ticks update completed: {stats['success']} success, "
-            f"{stats['failed']} failed, {stats['skipped']} skipped"
+            f"Minute ticks: {stats['success']} ok, {stats['failed']} fail, {stats['skipped']} skip"
         )
 
         return stats

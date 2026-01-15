@@ -972,10 +972,10 @@ class TestUpdateDailyTicks:
             symbols=symbols
         )
 
-        # Verify progress logging was called
+        # Verify completion logging was called (tqdm handles progress display)
         info_calls = [str(call) for call in app.logger.info.call_args_list]
-        progress_logged = any('Progress: 100/' in str(call) for call in info_calls)
-        assert progress_logged
+        completion_logged = any('Daily ticks:' in str(call) and 'skip' in str(call) for call in info_calls)
+        assert completion_logged
 
 
 class TestUpdateMinuteTicks:
