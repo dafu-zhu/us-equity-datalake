@@ -9,6 +9,7 @@ import pandas as pd
 import datetime as dt
 import os
 import io
+import requests
 from quantdl.master.security_master import SymbolNormalizer, SecurityMaster
 
 
@@ -1840,3 +1841,648 @@ class TestSecurityMasterSecOperations:
         call_args = mock_s3.upload_fileobj.call_args
         assert call_args[0][1] == 'test-bucket'  # bucket_name
         assert 'security_master.parquet' in call_args[0][2]  # s3_key
+
+
+class TestOpenFIGIIntegration:
+    """Test OpenFIGI integration methods"""
+
+    def test_fetch_openfigi_mapping_success(self):
+        """Test _fetch_openfigi_mapping with successful API response."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = Mock()
+        mock_response.json.return_value = [
+            {"data": [{"shareClassFIGI": "BBG001S5N8V8"}]},
+            {"data": [{"shareClassFIGI": "BBG000B9XRY4"}]},
+            {"error": "No identifier found."}
+        ]
+
+        with patch('quantdl.master.security_master.requests.post', return_value=mock_response):
+            with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
+                mock_rl.return_value.acquire = Mock()
+                result = sm._fetch_openfigi_mapping(['AAPL', 'MSFT', 'UNKNOWN'])
+
+        assert result['AAPL'] == 'BBG001S5N8V8'
+        assert result['MSFT'] == 'BBG000B9XRY4'
+        assert result['UNKNOWN'] is None
+
+    def test_fetch_openfigi_mapping_api_error(self):
+        """Test _fetch_openfigi_mapping handles API errors gracefully."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        with patch('quantdl.master.security_master.requests.post') as mock_post:
+            mock_post.side_effect = Exception("API error")
+            with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
+                mock_rl.return_value.acquire = Mock()
+                result = sm._fetch_openfigi_mapping(['AAPL'])
+
+        assert result['AAPL'] is None
+        sm.logger.error.assert_called()
+
+    def test_fetch_openfigi_mapping_batching(self):
+        """Test _fetch_openfigi_mapping handles batching correctly."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        # Create 150 tickers to test batching (should result in 6 batches of 25)
+        tickers = [f'SYM{i:03d}' for i in range(150)]
+
+        call_count = 0
+        def mock_post(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            mock_resp = Mock()
+            batch_size = len(kwargs.get('json', []))
+            mock_resp.json.return_value = [
+                {"data": [{"shareClassFIGI": f"FIGI{i}"}]}
+                for i in range(batch_size)
+            ]
+            return mock_resp
+
+        with patch('quantdl.master.security_master.requests.post', side_effect=mock_post):
+            with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
+                mock_rl.return_value.acquire = Mock()
+                result = sm._fetch_openfigi_mapping(tickers)
+
+        # Should have made 6 API calls (25 * 6 = 150 tickers)
+        assert call_count == 6
+        assert len(result) == 150
+
+    def test_fetch_openfigi_uses_api_key_when_available(self):
+        """Test _fetch_openfigi_mapping uses API key from environment."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        mock_response = Mock()
+        mock_response.json.return_value = [{"data": [{"shareClassFIGI": "FIGI123"}]}]
+
+        with patch.dict(os.environ, {'OPENFIGI_API_KEY': 'test-key'}):
+            with patch('quantdl.master.security_master.requests.post', return_value=mock_response) as mock_post:
+                with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
+                    mock_rl.return_value.acquire = Mock()
+                    sm._fetch_openfigi_mapping(['AAPL'])
+
+        # Check that API key header was included
+        call_args = mock_post.call_args
+        headers = call_args.kwargs.get('headers', {})
+        assert headers.get('X-OPENFIGI-APIKEY') == 'test-key'
+
+
+class TestNasdaqUniverse:
+    """Test Nasdaq universe fetching"""
+
+    @patch('quantdl.master.security_master.fetch_all_stocks')
+    def test_fetch_nasdaq_universe_success(self, mock_fetch):
+        """Test _fetch_nasdaq_universe returns set of tickers."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        mock_fetch.return_value = pd.DataFrame({'Ticker': ['AAPL', 'MSFT', 'GOOGL']})
+
+        result = sm._fetch_nasdaq_universe()
+
+        assert result == {'AAPL', 'MSFT', 'GOOGL'}
+        mock_fetch.assert_called_once_with(with_filter=True, refresh=True, logger=sm.logger)
+
+    @patch('quantdl.master.security_master.fetch_all_stocks')
+    def test_fetch_nasdaq_universe_error(self, mock_fetch):
+        """Test _fetch_nasdaq_universe returns empty set on error."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        mock_fetch.side_effect = Exception("FTP error")
+
+        result = sm._fetch_nasdaq_universe()
+
+        assert result == set()
+        sm.logger.error.assert_called()
+
+
+class TestRebrandDetection:
+    """Test rebrand detection logic"""
+
+    def test_detect_rebrands_finds_match(self):
+        """Test _detect_rebrands finds rebrands by FIGI match."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        disappeared = {'FB'}
+        appeared = {'META'}
+        figi_mapping = {
+            'FB': 'BBG000MM2P62',
+            'META': 'BBG000MM2P62'  # Same FIGI = rebrand
+        }
+
+        result = sm._detect_rebrands(disappeared, appeared, figi_mapping)
+
+        assert len(result) == 1
+        assert result[0] == ('FB', 'META', 'BBG000MM2P62')
+
+    def test_detect_rebrands_no_match(self):
+        """Test _detect_rebrands with no FIGI matches."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        disappeared = {'OLDCO'}
+        appeared = {'NEWCO'}
+        figi_mapping = {
+            'OLDCO': 'FIGI_OLD',
+            'NEWCO': 'FIGI_NEW'  # Different FIGIs
+        }
+
+        result = sm._detect_rebrands(disappeared, appeared, figi_mapping)
+
+        assert len(result) == 0
+
+    def test_detect_rebrands_missing_figi(self):
+        """Test _detect_rebrands handles missing FIGI mappings."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        disappeared = {'OLD'}
+        appeared = {'NEW'}
+        figi_mapping = {
+            'OLD': None,  # No FIGI
+            'NEW': 'FIGI_NEW'
+        }
+
+        result = sm._detect_rebrands(disappeared, appeared, figi_mapping)
+
+        assert len(result) == 0
+
+
+class TestPrevUniversePersistence:
+    """Test prev_universe save/load operations"""
+
+    def test_load_prev_universe_success(self):
+        """Test _load_prev_universe loads from S3."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        mock_s3 = Mock()
+        mock_s3.get_object.return_value = {
+            'Body': Mock(read=Mock(return_value=b'{"tickers": ["AAPL", "MSFT"], "date": "2025-01-15"}'))
+        }
+
+        result, date = sm._load_prev_universe(mock_s3, 'test-bucket')
+
+        assert result == {'AAPL', 'MSFT'}
+        assert date == '2025-01-15'
+
+    def test_load_prev_universe_not_found(self):
+        """Test _load_prev_universe returns empty set when file not found."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        mock_s3 = Mock()
+        mock_s3.exceptions.NoSuchKey = Exception
+        mock_s3.get_object.side_effect = mock_s3.exceptions.NoSuchKey("Not found")
+
+        result, date = sm._load_prev_universe(mock_s3, 'test-bucket')
+
+        assert result == set()
+        assert date is None
+
+    def test_save_prev_universe(self):
+        """Test _save_prev_universe saves to S3."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        mock_s3 = Mock()
+        universe = {'AAPL', 'MSFT', 'GOOGL'}
+
+        sm._save_prev_universe(mock_s3, 'test-bucket', universe, '2025-01-15')
+
+        mock_s3.put_object.assert_called_once()
+        call_args = mock_s3.put_object.call_args
+        assert call_args.kwargs['Bucket'] == 'test-bucket'
+        assert call_args.kwargs['Key'] == 'data/master/prev_universe.json'
+
+        # Verify JSON content
+        import json
+        body = json.loads(call_args.kwargs['Body'].decode('utf-8'))
+        assert set(body['tickers']) == universe
+        assert body['date'] == '2025-01-15'
+
+
+class TestUpdateNoWRDS:
+    """Test update_no_wrds method"""
+
+    def test_update_no_wrds_bootstrap(self):
+        """Test update_no_wrds bootstraps when no prev_universe exists."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+        sm.master_tb = pl.DataFrame({
+            'security_id': [101],
+            'symbol': ['AAPL'],
+            'company': ['Apple Inc'],
+            'permno': [555],
+            'cik': ['0000320193'],
+            'cusip': ['037833100'],
+            'start_date': [dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2024, 12, 31)]
+        })
+
+        mock_s3 = Mock()
+        mock_s3.exceptions.NoSuchKey = Exception
+        mock_s3.get_object.side_effect = mock_s3.exceptions.NoSuchKey("Not found")
+
+        with patch.object(sm, '_fetch_nasdaq_universe', return_value={'AAPL'}):
+            with patch.object(sm, 'export_to_s3'):
+                stats = sm.update_no_wrds(mock_s3, 'test-bucket')
+
+        assert stats['extended'] == 1
+        # Verify end_date was extended
+        assert sm.master_tb['end_date'][0] == dt.date.today()
+
+    def test_update_no_wrds_extends_active(self):
+        """Test update_no_wrds extends end_date for active securities."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+        sm.master_tb = pl.DataFrame({
+            'security_id': [101, 102],
+            'symbol': ['AAPL', 'MSFT'],
+            'company': ['Apple', 'Microsoft'],
+            'permno': [555, 666],
+            'cik': ['0000320193', '0000789019'],
+            'cusip': ['037833100', '594918104'],
+            'start_date': [dt.date(2020, 1, 1), dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2024, 12, 31), dt.date(2024, 12, 31)]
+        })
+
+        mock_s3 = Mock()
+        # Return prev_universe
+        mock_s3.get_object.return_value = {
+            'Body': Mock(read=Mock(return_value=b'{"tickers": ["AAPL", "MSFT"], "date": "2025-01-14"}'))
+        }
+        mock_s3.exceptions.NoSuchKey = Exception
+
+        with patch.object(sm, '_fetch_nasdaq_universe', return_value={'AAPL', 'MSFT'}):
+            with patch.object(sm, 'export_to_s3'):
+                stats = sm.update_no_wrds(mock_s3, 'test-bucket')
+
+        assert stats['extended'] == 2
+
+    def test_update_no_wrds_detects_rebrand(self):
+        """Test update_no_wrds detects and handles rebrands."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+        sm.master_tb = pl.DataFrame({
+            'security_id': [101],
+            'symbol': ['FB'],
+            'company': ['Facebook'],
+            'permno': [555],
+            'cik': ['0001326801'],
+            'cusip': ['30303M102'],
+            'start_date': [dt.date(2012, 5, 18)],
+            'end_date': [dt.date(2024, 12, 31)]
+        })
+
+        mock_s3 = Mock()
+        mock_s3.get_object.return_value = {
+            'Body': Mock(read=Mock(return_value=b'{"tickers": ["FB"], "date": "2025-01-14"}'))
+        }
+        mock_s3.exceptions.NoSuchKey = Exception
+
+        # FB disappeared, META appeared with same FIGI
+        figi_mapping = {'FB': 'BBG000MM2P62', 'META': 'BBG000MM2P62'}
+
+        with patch.object(sm, '_fetch_nasdaq_universe', return_value={'META'}):
+            with patch.object(sm, '_fetch_openfigi_mapping', return_value=figi_mapping):
+                with patch.object(sm, 'export_to_s3'):
+                    stats = sm.update_no_wrds(mock_s3, 'test-bucket')
+
+        assert stats['rebranded'] == 1
+
+        # Verify new row added with same security_id
+        meta_rows = sm.master_tb.filter(pl.col('symbol') == 'META')
+        assert len(meta_rows) == 1
+        assert meta_rows['security_id'][0] == 101  # Same security_id
+
+    def test_update_no_wrds_adds_new_ipo(self):
+        """Test update_no_wrds adds new IPOs."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+        sm.master_tb = pl.DataFrame({
+            'security_id': [101],
+            'symbol': ['AAPL'],
+            'company': ['Apple'],
+            'permno': [555],
+            'cik': ['0000320193'],
+            'cusip': ['037833100'],
+            'start_date': [dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2024, 12, 31)]
+        })
+
+        mock_s3 = Mock()
+        mock_s3.get_object.return_value = {
+            'Body': Mock(read=Mock(return_value=b'{"tickers": ["AAPL"], "date": "2025-01-14"}'))
+        }
+        mock_s3.exceptions.NoSuchKey = Exception
+
+        figi_mapping = {'NEWIPO': 'FIGI_NEW'}
+
+        with patch.object(sm, '_fetch_nasdaq_universe', return_value={'AAPL', 'NEWIPO'}):
+            with patch.object(sm, '_fetch_openfigi_mapping', return_value=figi_mapping):
+                with patch.object(sm, 'export_to_s3'):
+                    stats = sm.update_no_wrds(mock_s3, 'test-bucket')
+
+        assert stats['added'] == 1
+        assert stats['extended'] == 1  # AAPL extended
+
+        # Verify new IPO row
+        new_rows = sm.master_tb.filter(pl.col('symbol') == 'NEWIPO')
+        assert len(new_rows) == 1
+        assert new_rows['security_id'][0] == 102  # New security_id
+
+    def test_update_no_wrds_grace_period(self):
+        """Test update_no_wrds respects grace period for delisting."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+        # OLDCO + AAPL existed yesterday, only AAPL in current
+        sm.master_tb = pl.DataFrame({
+            'security_id': [101, 102],
+            'symbol': ['OLDCO', 'AAPL'],
+            'company': ['Old Corp', 'Apple'],
+            'permno': [555, 666],
+            'cik': ['0001234567', '0000320193'],
+            'cusip': ['12345678', '037833100'],
+            'start_date': [dt.date(2020, 1, 1), dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2024, 12, 31), dt.date(2024, 12, 31)]
+        })
+
+        mock_s3 = Mock()
+        yesterday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+
+        # Prev universe had both OLDCO and AAPL
+        mock_s3.get_object.return_value = {
+            'Body': Mock(read=Mock(return_value=f'{{"tickers": ["OLDCO", "AAPL"], "date": "{yesterday}"}}'.encode()))
+        }
+        mock_s3.exceptions.NoSuchKey = type('NoSuchKey', (Exception,), {})
+
+        # Current Nasdaq only has AAPL (OLDCO disappeared but within grace period)
+        with patch.object(sm, '_fetch_nasdaq_universe', return_value={'AAPL'}):
+            with patch.object(sm, '_fetch_openfigi_mapping', return_value={'OLDCO': 'FIGI_OLD'}):
+                with patch.object(sm, 'export_to_s3'):
+                    stats = sm.update_no_wrds(mock_s3, 'test-bucket', grace_period_days=14)
+
+        # AAPL extended (active), OLDCO extended (in grace period, only 1 day missing)
+        assert stats['extended'] == 2
+        assert stats['delisted'] == 0
+
+
+class TestOverwriteFromCRSP:
+    """Test overwrite_from_crsp method"""
+
+    def test_overwrite_from_crsp(self):
+        """Test overwrite_from_crsp rebuilds from CRSP with FIGI."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+        sm.db = None
+        sm.master_tb = pl.DataFrame({
+            'security_id': [101],
+            'symbol': ['OLD'],
+            'company': ['Old'],
+            'permno': [1],
+            'cik': ['0001'],
+            'cusip': ['11111111'],
+            'start_date': [dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2020, 12, 31)]
+        })
+        sm.CRSP_LATEST_DATE = '2024-12-31'
+
+        mock_db = Mock()
+        mock_s3 = Mock()
+
+        # Mock cik_cusip_mapping and master_table
+        new_master = pl.DataFrame({
+            'security_id': [101, 102],
+            'symbol': ['AAPL', 'MSFT'],
+            'company': ['Apple', 'Microsoft'],
+            'permno': [555, 666],
+            'cik': ['0000320193', '0000789019'],
+            'cusip': ['037833100', '594918104'],
+            'start_date': [dt.date(2020, 1, 1), dt.date(2020, 1, 1)],
+            'end_date': [dt.date(2024, 12, 31), dt.date(2024, 12, 31)]
+        })
+
+        figi_mapping = {'AAPL': 'FIGI_AAPL', 'MSFT': 'FIGI_MSFT'}
+
+        with patch.object(sm, 'cik_cusip_mapping'):
+            with patch.object(sm, 'master_table', return_value=new_master):
+                with patch.object(sm, '_fetch_openfigi_mapping', return_value=figi_mapping):
+                    with patch.object(sm, 'export_to_s3'):
+                        # Need to manually set master_tb since master_table is mocked
+                        sm.master_tb = new_master
+                        stats = sm.overwrite_from_crsp(mock_db, mock_s3)
+
+        assert stats['rows'] == 2
+        assert stats['figi_mapped'] == 2
+
+
+class TestOpenFIGIRetryBehavior:
+    """Test OpenFIGI 413 retry and backoff behavior"""
+
+    def test_fetch_openfigi_413_reduces_batch_size(self):
+        """Test _fetch_openfigi_mapping reduces batch size on 413 error."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        call_count = 0
+        batch_sizes = []
+
+        def mock_post(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            batch_size = len(kwargs.get('json', []))
+            batch_sizes.append(batch_size)
+
+            mock_resp = Mock()
+            # First call: return 413
+            if call_count == 1:
+                mock_resp.status_code = 413
+                return mock_resp
+            # Second call (reduced batch): succeed
+            mock_resp.status_code = 200
+            mock_resp.raise_for_status = Mock()
+            mock_resp.json.return_value = [
+                {"data": [{"shareClassFIGI": f"FIGI{i}"}]}
+                for i in range(batch_size)
+            ]
+            return mock_resp
+
+        tickers = [f'SYM{i:02d}' for i in range(10)]
+
+        with patch('quantdl.master.security_master.requests.post', side_effect=mock_post):
+            with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
+                mock_rl.return_value.acquire = Mock()
+                result = sm._fetch_openfigi_mapping(tickers)
+
+        # Should have reduced batch size on 413
+        assert batch_sizes[0] == 10
+        assert batch_sizes[1] < 10  # Reduced
+        sm.logger.warning.assert_called()
+
+    def test_fetch_openfigi_413_at_min_batch_marks_none(self):
+        """Test _fetch_openfigi_mapping marks tickers as None when at min batch size."""
+        from quantdl.master.security_master import OPENFIGI_MIN_BATCH_SIZE
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        def mock_post(*args, **kwargs):
+            mock_resp = Mock()
+            mock_resp.status_code = 413
+            return mock_resp
+
+        # Use exactly min batch size
+        tickers = [f'SYM{i}' for i in range(OPENFIGI_MIN_BATCH_SIZE)]
+
+        with patch('quantdl.master.security_master.requests.post', side_effect=mock_post):
+            with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
+                mock_rl.return_value.acquire = Mock()
+                result = sm._fetch_openfigi_mapping(tickers)
+
+        # All tickers should be marked None
+        assert all(v is None for v in result.values())
+        assert len(result) == OPENFIGI_MIN_BATCH_SIZE
+
+    def test_fetch_openfigi_429_retries_with_backoff(self):
+        """Test _fetch_openfigi_mapping retries on 429 with exponential backoff."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        call_count = 0
+
+        def mock_post(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            mock_resp = Mock()
+            # First 2 calls: 429
+            if call_count <= 2:
+                mock_resp.status_code = 429
+                return mock_resp
+            # Third call: success
+            mock_resp.status_code = 200
+            mock_resp.raise_for_status = Mock()
+            mock_resp.json.return_value = [{"data": [{"shareClassFIGI": "FIGI1"}]}]
+            return mock_resp
+
+        with patch('quantdl.master.security_master.requests.post', side_effect=mock_post):
+            with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
+                mock_rl.return_value.acquire = Mock()
+                with patch('quantdl.master.security_master.time.sleep') as mock_sleep:
+                    result = sm._fetch_openfigi_mapping(['AAPL'])
+
+        # Should have retried twice
+        assert call_count == 3
+        # Should have slept with exponential backoff (1s, 2s)
+        assert mock_sleep.call_count == 2
+        assert result['AAPL'] == 'FIGI1'
+
+    def test_fetch_openfigi_5xx_retries(self):
+        """Test _fetch_openfigi_mapping retries on 5xx server errors."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        call_count = 0
+
+        def mock_post(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            mock_resp = Mock()
+            if call_count == 1:
+                mock_resp.status_code = 503
+                return mock_resp
+            mock_resp.status_code = 200
+            mock_resp.raise_for_status = Mock()
+            mock_resp.json.return_value = [{"data": [{"shareClassFIGI": "FIGI1"}]}]
+            return mock_resp
+
+        with patch('quantdl.master.security_master.requests.post', side_effect=mock_post):
+            with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
+                mock_rl.return_value.acquire = Mock()
+                with patch('quantdl.master.security_master.time.sleep'):
+                    result = sm._fetch_openfigi_mapping(['AAPL'])
+
+        assert call_count == 2
+        assert result['AAPL'] == 'FIGI1'
+
+    def test_fetch_openfigi_exhausts_retries(self):
+        """Test _fetch_openfigi_mapping marks None after exhausting retries."""
+        from quantdl.master.security_master import OPENFIGI_MAX_RETRIES
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        def mock_post(*args, **kwargs):
+            mock_resp = Mock()
+            mock_resp.status_code = 500
+            return mock_resp
+
+        with patch('quantdl.master.security_master.requests.post', side_effect=mock_post):
+            with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
+                mock_rl.return_value.acquire = Mock()
+                with patch('quantdl.master.security_master.time.sleep'):
+                    result = sm._fetch_openfigi_mapping(['AAPL'])
+
+        assert result['AAPL'] is None
+        sm.logger.warning.assert_called()
+
+    def test_fetch_openfigi_progress_logging(self):
+        """Test _fetch_openfigi_mapping logs progress every 10 batches."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        # Create enough tickers for multiple batches (25 per batch)
+        tickers = [f'SYM{i:03d}' for i in range(300)]  # 12 batches
+
+        def mock_post(*args, **kwargs):
+            mock_resp = Mock()
+            mock_resp.status_code = 200
+            mock_resp.raise_for_status = Mock()
+            batch_size = len(kwargs.get('json', []))
+            mock_resp.json.return_value = [
+                {"data": [{"shareClassFIGI": f"FIGI{i}"}]}
+                for i in range(batch_size)
+            ]
+            return mock_resp
+
+        with patch('quantdl.master.security_master.requests.post', side_effect=mock_post):
+            with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
+                mock_rl.return_value.acquire = Mock()
+                result = sm._fetch_openfigi_mapping(tickers)
+
+        # Check progress logging (should log at batch 10, 12)
+        info_calls = [str(call) for call in sm.logger.info.call_args_list]
+        progress_logs = [c for c in info_calls if 'progress' in c.lower()]
+        assert len(progress_logs) >= 2  # At least 10th batch and final
+
+    def test_fetch_openfigi_request_exception_retries(self):
+        """Test _fetch_openfigi_mapping retries on RequestException."""
+        sm = SecurityMaster.__new__(SecurityMaster)
+        sm.logger = Mock()
+
+        call_count = 0
+
+        def mock_post(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise requests.RequestException("Connection error")
+            mock_resp = Mock()
+            mock_resp.status_code = 200
+            mock_resp.raise_for_status = Mock()
+            mock_resp.json.return_value = [{"data": [{"shareClassFIGI": "FIGI1"}]}]
+            return mock_resp
+
+        with patch('quantdl.master.security_master.requests.post', side_effect=mock_post):
+            with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
+                mock_rl.return_value.acquire = Mock()
+                with patch('quantdl.master.security_master.time.sleep'):
+                    result = sm._fetch_openfigi_mapping(['AAPL'])
+
+        assert call_count == 2
+        assert result['AAPL'] == 'FIGI1'

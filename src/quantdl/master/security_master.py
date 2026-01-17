@@ -6,7 +6,7 @@ import os
 import time
 import requests
 import datetime as dt
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Set, Any
 from pathlib import Path
 import logging
 import io
@@ -15,8 +15,16 @@ import pyarrow.parquet as pq
 from quantdl.utils.logger import setup_logger
 from quantdl.universe.current import fetch_all_stocks
 from quantdl.utils.wrds import raw_sql_with_retry
+from quantdl.storage.rate_limiter import RateLimiter
 
 load_dotenv()
+
+# OpenFIGI rate limits: 25 req/min (no key) or 250 req/min (with key)
+OPENFIGI_RATE_LIMIT_NO_KEY = 25 / 60  # ~0.42 req/sec
+OPENFIGI_RATE_LIMIT_WITH_KEY = 250 / 60  # ~4.2 req/sec
+OPENFIGI_BATCH_SIZE = 25  # Max tickers per request (larger batches cause 413 errors)
+OPENFIGI_MIN_BATCH_SIZE = 5  # Minimum batch size before giving up
+OPENFIGI_MAX_RETRIES = 3  # Max retries per batch on transient errors
 
 
 class SymbolNormalizer:
@@ -176,7 +184,7 @@ class SecurityMaster:
     def __init__(
         self,
         db: Optional[wrds.Connection] = None,
-        s3_client = None,
+        s3_client: Optional[Any] = None,
         bucket_name: str = 'us-equity-datalake',
         s3_key: str = 'data/master/security_master.parquet',
         force_rebuild: bool = False
@@ -526,6 +534,8 @@ class SecurityMaster:
 
         Schema: (security_id, permno, symbol, cik, start_date, end_date)
         """
+        assert self.cik_cusip is not None, "cik_cusip not initialized (loaded from S3?)"
+
         # Step 1: Group by (permno, symbol) to collect ALL CIKs for each symbol period
         # This handles the case where the same symbol has multiple overlapping CIK records
         period_groups = (
@@ -794,7 +804,7 @@ class SecurityMaster:
 
     def export_to_s3(
         self,
-        s3_client,
+        s3_client: Any,
         bucket_name: str = 'us-equity-datalake',
         s3_key: str = 'data/master/security_master.parquet'
     ) -> Dict[str, str]:
@@ -843,7 +853,7 @@ class SecurityMaster:
 
     def _load_from_s3(
         self,
-        s3_client,
+        s3_client: Any,
         bucket_name: str,
         s3_key: str
     ) -> Tuple[pl.DataFrame, Dict[str, str]]:
@@ -871,17 +881,18 @@ class SecurityMaster:
                 for k, v in table.schema.metadata.items()
             }
 
-        # Convert to Polars
+        # Convert to Polars (from_arrow on Table always returns DataFrame)
         df = pl.from_arrow(table)
+        assert isinstance(df, pl.DataFrame)
 
         self.logger.debug(f"Loaded SecurityMaster from S3: {len(df)} rows, metadata: {metadata}")
         return df, metadata
 
     def update_from_sec(
         self,
-        s3_client=None,
+        s3_client: Optional[Any] = None,
         bucket_name: str = 'us-equity-datalake'
-    ) -> Dict[str, int]:
+    ) -> Dict[str, Any]:
         """
         Update master_tb from SEC company_tickers.json (WRDS-free updates).
 
@@ -890,7 +901,7 @@ class SecurityMaster:
 
         :param s3_client: Optional S3 client to export updated master_tb
         :param bucket_name: S3 bucket name for export
-        :return: Dict with counts {'extended': N, 'added': N, 'unchanged': N}
+        :return: Dict with counts {'extended': N, 'added': N, 'unchanged': N} or 'error' on failure
         """
         try:
             sec_df = self._fetch_sec_mapping_full()
@@ -928,7 +939,7 @@ class SecurityMaster:
             self.master_tb['symbol'].to_list(),
             self.master_tb['cik'].to_list()
         ))
-        max_sid = self.master_tb['security_id'].max()
+        max_sid: int = self.master_tb['security_id'].max() or 1000  # type: ignore[assignment]
 
         new_rows = []
         for row in sec_df.iter_rows(named=True):
@@ -962,6 +973,595 @@ class SecurityMaster:
                 f"SecurityMaster updated: {stats['extended']} extended, "
                 f"{stats['added']} added, {stats['unchanged']} unchanged"
             )
+
+        return stats
+
+    def _fetch_openfigi_mapping(
+        self,
+        tickers: List[str],
+        rate_limiter: Optional[RateLimiter] = None
+    ) -> Dict[str, Optional[str]]:
+        """
+        Batch lookup ticker → shareClassFIGI via OpenFIGI API.
+
+        API: POST https://api.openfigi.com/v3/mapping
+        Rate limit: 25 req/min (no key) or 250 req/min (with key)
+        Batch size: 25 tickers per request (reduced on 413 errors)
+
+        Features:
+        - Retry with exponential backoff on 429/5xx errors
+        - Batch size reduction on 413 (payload too large)
+        - Progress logging every 10 batches
+
+        :param tickers: List of ticker symbols
+        :param rate_limiter: Optional RateLimiter instance
+        :return: Dict mapping ticker → shareClassFIGI (None if not found)
+        """
+        url = "https://api.openfigi.com/v3/mapping"
+        headers = {"Content-Type": "application/json"}
+
+        # Use API key if available
+        api_key = os.getenv("OPENFIGI_API_KEY")
+        if api_key:
+            headers["X-OPENFIGI-APIKEY"] = api_key
+            max_rate = OPENFIGI_RATE_LIMIT_WITH_KEY
+        else:
+            max_rate = OPENFIGI_RATE_LIMIT_NO_KEY
+
+        # Create rate limiter if not provided
+        if rate_limiter is None:
+            rate_limiter = RateLimiter(max_rate=max_rate)
+
+        results: Dict[str, Optional[str]] = {}
+        total_batches = (len(tickers) + OPENFIGI_BATCH_SIZE - 1) // OPENFIGI_BATCH_SIZE
+        batches_processed = 0
+
+        self.logger.info(f"Starting OpenFIGI lookup for {len(tickers)} tickers ({total_batches} batches)")
+
+        # Process in batches
+        i = 0
+        while i < len(tickers):
+            batch = tickers[i:i + OPENFIGI_BATCH_SIZE]
+            current_batch_size = len(batch)
+
+            # Retry loop with exponential backoff
+            success = False
+            retry_count = 0
+            working_batch = batch
+
+            while not success and retry_count <= OPENFIGI_MAX_RETRIES:
+                # Build request payload
+                payload = [
+                    {"idType": "TICKER", "idValue": t, "exchCode": "US"}
+                    for t in working_batch
+                ]
+
+                try:
+                    rate_limiter.acquire()
+                    response = requests.post(url, json=payload, headers=headers, timeout=30)
+
+                    # Handle specific HTTP errors
+                    if response.status_code == 413:
+                        # Payload too large - reduce batch size
+                        new_size = max(len(working_batch) // 2, OPENFIGI_MIN_BATCH_SIZE)
+                        if len(working_batch) <= OPENFIGI_MIN_BATCH_SIZE:
+                            self.logger.warning(
+                                f"413 error at minimum batch size ({OPENFIGI_MIN_BATCH_SIZE}), "
+                                f"marking {len(working_batch)} tickers as unmapped"
+                            )
+                            for t in working_batch:
+                                results[t] = None
+                            success = True
+                            break
+
+                        self.logger.warning(
+                            f"413 error, reducing batch size from {len(working_batch)} to {new_size}"
+                        )
+                        # Process first half now, second half will be picked up in next iteration
+                        working_batch = working_batch[:new_size]
+                        retry_count += 1
+                        continue
+
+                    if response.status_code == 429 or response.status_code >= 500:
+                        # Rate limited or server error - exponential backoff
+                        wait_time = 2 ** retry_count
+                        self.logger.warning(
+                            f"HTTP {response.status_code}, retrying in {wait_time}s "
+                            f"(attempt {retry_count + 1}/{OPENFIGI_MAX_RETRIES + 1})"
+                        )
+                        time.sleep(wait_time)
+                        retry_count += 1
+                        continue
+
+                    response.raise_for_status()
+                    data = response.json()
+
+                    # Parse response - each item corresponds to a ticker
+                    for j, item in enumerate(data):
+                        ticker = working_batch[j]
+                        if "data" in item and item["data"]:
+                            figi = item["data"][0].get("shareClassFIGI")
+                            results[ticker] = figi
+                        else:
+                            results[ticker] = None
+
+                    success = True
+
+                    # If we reduced batch size, process remaining tickers from original batch
+                    if len(working_batch) < current_batch_size:
+                        remaining = batch[len(working_batch):]
+                        if remaining:
+                            # Insert remaining at front of unprocessed tickers
+                            tickers = tickers[:i] + remaining + tickers[i + OPENFIGI_BATCH_SIZE:]
+                            # Adjust total batches estimate
+                            total_batches = (len(tickers) - i + OPENFIGI_BATCH_SIZE - 1) // OPENFIGI_BATCH_SIZE + batches_processed
+
+                except requests.RequestException as e:
+                    if retry_count < OPENFIGI_MAX_RETRIES:
+                        wait_time = 2 ** retry_count
+                        self.logger.warning(
+                            f"Request error: {e}, retrying in {wait_time}s "
+                            f"(attempt {retry_count + 1}/{OPENFIGI_MAX_RETRIES + 1})"
+                        )
+                        time.sleep(wait_time)
+                        retry_count += 1
+                    else:
+                        self.logger.warning(
+                            f"OpenFIGI batch failed after {OPENFIGI_MAX_RETRIES + 1} attempts: {e}"
+                        )
+                        for t in working_batch:
+                            results[t] = None
+                        success = True
+
+                except Exception as e:
+                    self.logger.error(f"Unexpected error in OpenFIGI lookup: {e}")
+                    for t in working_batch:
+                        results[t] = None
+                    success = True
+
+            # Mark exhausted retries
+            if not success:
+                self.logger.warning(
+                    f"Batch exhausted retries, marking {len(working_batch)} tickers as unmapped"
+                )
+                for t in working_batch:
+                    results[t] = None
+
+            i += OPENFIGI_BATCH_SIZE
+            batches_processed += 1
+
+            # Progress logging every 10 batches
+            if batches_processed % 10 == 0 or batches_processed == total_batches:
+                pct = (batches_processed / total_batches) * 100
+                self.logger.info(f"OpenFIGI progress: {batches_processed}/{total_batches} batches ({pct:.0f}%)")
+
+        found = sum(1 for v in results.values() if v is not None)
+        self.logger.info(f"OpenFIGI lookup complete: {found}/{len(results)} tickers mapped to FIGIs")
+
+        return results
+
+    def _fetch_nasdaq_universe(self) -> Set[str]:
+        """
+        Fetch current active stocks from Nasdaq FTP.
+
+        :return: Set of active ticker symbols (Nasdaq format)
+        """
+        try:
+            df = fetch_all_stocks(with_filter=True, refresh=True, logger=self.logger)
+            tickers = set(df['Ticker'].tolist())
+            self.logger.info(f"Fetched {len(tickers)} active tickers from Nasdaq")
+            return tickers
+        except Exception as e:
+            self.logger.error(f"Failed to fetch Nasdaq universe: {e}")
+            return set()
+
+    def _detect_rebrands(
+        self,
+        disappeared: Set[str],
+        appeared: Set[str],
+        figi_mapping: Dict[str, Optional[str]]
+    ) -> List[Tuple[str, str, str]]:
+        """
+        Detect rebrands by matching shareClassFIGI between disappeared and appeared tickers.
+
+        :param disappeared: Tickers that were in prev but not in current
+        :param appeared: Tickers that are in current but not in prev
+        :param figi_mapping: Dict mapping ticker → shareClassFIGI
+        :return: List of (old_ticker, new_ticker, figi) tuples for detected rebrands
+        """
+        rebrands = []
+
+        # Build reverse lookup: FIGI → disappeared ticker
+        figi_to_old: Dict[str, str] = {}
+        for ticker in disappeared:
+            figi = figi_mapping.get(ticker)
+            if figi:
+                figi_to_old[figi] = ticker
+
+        # Check if any appeared ticker has same FIGI as a disappeared ticker
+        for ticker in appeared:
+            figi = figi_mapping.get(ticker)
+            if figi and figi in figi_to_old:
+                old_ticker = figi_to_old[figi]
+                rebrands.append((old_ticker, ticker, figi))
+                self.logger.info(f"Detected rebrand: {old_ticker} → {ticker} (FIGI: {figi})")
+
+        return rebrands
+
+    def _load_prev_universe(
+        self,
+        s3_client: Any,
+        bucket_name: str
+    ) -> Tuple[Set[str], Optional[str]]:
+        """
+        Load previous universe from S3 metadata.
+
+        :return: Tuple of (prev_universe set, prev_date string or None)
+        """
+        s3_key = "data/master/prev_universe.json"
+
+        try:
+            response = s3_client.get_object(Bucket=bucket_name, Key=s3_key)
+            import json
+            data = json.loads(response['Body'].read().decode('utf-8'))
+            prev_universe = set(data.get('tickers', []))
+            prev_date = data.get('date')
+            self.logger.info(f"Loaded prev_universe: {len(prev_universe)} tickers from {prev_date}")
+            return prev_universe, prev_date
+        except s3_client.exceptions.NoSuchKey:
+            self.logger.info("No prev_universe found, will bootstrap from current Nasdaq list")
+            return set(), None
+        except Exception as e:
+            self.logger.warning(f"Failed to load prev_universe: {e}, bootstrapping")
+            return set(), None
+
+    def _save_prev_universe(
+        self,
+        s3_client: Any,
+        bucket_name: str,
+        universe: Set[str],
+        date: str
+    ) -> None:
+        """
+        Save current universe to S3 for next run.
+
+        :param universe: Set of ticker symbols
+        :param date: Date string (YYYY-MM-DD)
+        """
+        s3_key = "data/master/prev_universe.json"
+
+        import json
+        data = {
+            'tickers': sorted(list(universe)),
+            'date': date
+        }
+
+        body = json.dumps(data).encode('utf-8')
+        s3_client.put_object(
+            Bucket=bucket_name,
+            Key=s3_key,
+            Body=body,
+            ContentType='application/json'
+        )
+        self.logger.info(f"Saved prev_universe: {len(universe)} tickers for {date}")
+
+    def update_no_wrds(
+        self,
+        s3_client: Any,
+        bucket_name: str = 'us-equity-datalake',
+        grace_period_days: int = 14
+    ) -> Dict[str, int]:
+        """
+        Update master_tb using Nasdaq + OpenFIGI (no WRDS required).
+
+        Algorithm:
+        1. EXTEND: Ticker in both prev and current → update end_date to today
+        2. REBRAND: Old ticker disappeared, new appeared, same shareClassFIGI
+           → Close old row, create new row with SAME security_id
+        3. NEW IPO: New ticker with new FIGI → create row with NEW security_id
+        4. DELIST: Ticker in prev but not current (for 14+ days) → freeze end_date
+
+        :param s3_client: S3 client for persistence
+        :param bucket_name: S3 bucket name
+        :param grace_period_days: Days before treating missing ticker as delisted
+        :return: Dict with counts {'extended', 'rebranded', 'added', 'delisted', 'unchanged'}
+        """
+        today = dt.date.today()
+        today_str = today.isoformat()
+
+        stats = {
+            'extended': 0,
+            'rebranded': 0,
+            'added': 0,
+            'delisted': 0,
+            'unchanged': 0
+        }
+
+        # 1. Load current Nasdaq universe
+        current_nasdaq = self._fetch_nasdaq_universe()
+        if not current_nasdaq:
+            self.logger.error("Failed to fetch Nasdaq universe, aborting update")
+            return stats
+
+        # 2. Load previous universe
+        prev_universe, prev_date = self._load_prev_universe(s3_client, bucket_name)
+
+        # Bootstrap: if no prev_universe, use current as baseline
+        if not prev_universe:
+            self.logger.info("Bootstrapping: using current Nasdaq list as prev_universe")
+            self._save_prev_universe(s3_client, bucket_name, current_nasdaq, today_str)
+            # Just extend end_dates for existing securities
+            return self._extend_existing_securities(current_nasdaq, today, s3_client, bucket_name)
+
+        # 3. Compute changes
+        # Normalize to CRSP format for comparison
+        def normalize(ticker):
+            return ticker.replace('.', '').replace('-', '').upper()
+
+        current_normalized = {normalize(t): t for t in current_nasdaq}
+        prev_normalized = {normalize(t): t for t in prev_universe}
+
+        current_set = set(current_normalized.keys())
+        prev_set = set(prev_normalized.keys())
+
+        still_active = current_set & prev_set  # In both
+        disappeared = prev_set - current_set    # In prev, not in current
+        appeared = current_set - prev_set       # In current, not in prev
+
+        self.logger.info(
+            f"Universe changes: {len(still_active)} active, "
+            f"{len(disappeared)} disappeared, {len(appeared)} appeared"
+        )
+
+        # 4. Fetch OpenFIGI mappings for disappeared + appeared tickers
+        tickers_to_lookup = list(disappeared | appeared)
+        figi_mapping: Dict[str, Optional[str]] = {}
+        if tickers_to_lookup:
+            # Convert back to original format for lookup
+            # t is guaranteed to be in one of the dicts since it came from their keys
+            original_tickers: List[str] = [
+                prev_normalized.get(t) or current_normalized[t]
+                for t in tickers_to_lookup
+            ]
+            figi_results = self._fetch_openfigi_mapping(original_tickers)
+            # Store with normalized keys
+            for t in tickers_to_lookup:
+                orig = prev_normalized.get(t) or current_normalized[t]
+                figi_mapping[t] = figi_results.get(orig)
+
+        # 5. Detect rebrands
+        rebrands = self._detect_rebrands(disappeared, appeared, figi_mapping)
+        rebrand_old = {r[0] for r in rebrands}
+        rebrand_new = {r[1] for r in rebrands}
+
+        # 6. Process updates
+        updated_rows = []
+        existing_keys = set()  # (symbol_normalized, cik)
+
+        for row in self.master_tb.iter_rows(named=True):
+            row_dict = dict(row)
+            symbol_norm = normalize(row['symbol'])
+            existing_keys.add((symbol_norm, row['cik']))
+
+            if symbol_norm in still_active:
+                # EXTEND: still active, update end_date
+                row_dict['end_date'] = today
+                stats['extended'] += 1
+
+            elif symbol_norm in rebrand_old:
+                # REBRAND (old ticker): close this row
+                # Find the rebrand tuple
+                for old, new, figi in rebrands:
+                    if old == symbol_norm:
+                        # Don't extend end_date (freeze it)
+                        # The new ticker row will be added separately
+                        break
+                stats['rebranded'] += 1
+
+            elif symbol_norm in disappeared:
+                # DELIST: check grace period
+                if prev_date:
+                    prev_dt = dt.datetime.strptime(prev_date, '%Y-%m-%d').date()
+                    days_missing = (today - prev_dt).days
+                    if days_missing < grace_period_days:
+                        # Still in grace period, extend end_date
+                        row_dict['end_date'] = today
+                        stats['extended'] += 1
+                    else:
+                        # Grace period passed, mark as delisted (freeze end_date)
+                        stats['delisted'] += 1
+                else:
+                    # No prev_date, can't determine grace period
+                    stats['unchanged'] += 1
+            else:
+                stats['unchanged'] += 1
+
+            updated_rows.append(row_dict)
+
+        # 7. Add rebrand new rows (same security_id as old)
+        for old_norm, new_norm, figi in rebrands:
+            # Find old row's security_id
+            old_row = self.master_tb.filter(
+                pl.col('symbol').str.replace_all(r'[.\-]', '').str.to_uppercase() == old_norm
+            ).head(1)
+
+            if old_row.is_empty():
+                self.logger.warning(f"Rebrand old ticker {old_norm} not found in master_tb")
+                continue
+
+            old_security_id = old_row['security_id'][0]
+            new_ticker = current_normalized[new_norm]
+
+            # Create new row with same security_id
+            new_row = {
+                'security_id': old_security_id,
+                'permno': old_row['permno'][0] if 'permno' in old_row.columns else None,
+                'symbol': new_ticker,
+                'company': old_row['company'][0] if 'company' in old_row.columns else '',
+                'cik': old_row['cik'][0] if 'cik' in old_row.columns else None,
+                'cusip': old_row['cusip'][0] if 'cusip' in old_row.columns else None,
+                'share_class_figi': figi,
+                'start_date': today,
+                'end_date': today
+            }
+            updated_rows.append(new_row)
+
+        # 8. Add truly new IPOs (new FIGI, not a rebrand)
+        max_sid: int = self.master_tb['security_id'].max() or 1000  # type: ignore[assignment]
+        new_ipos = appeared - rebrand_new
+
+        for ticker_norm in new_ipos:
+            ticker = current_normalized[ticker_norm]
+            figi = figi_mapping.get(ticker_norm)
+
+            max_sid += 1
+            new_row = {
+                'security_id': max_sid,
+                'permno': None,
+                'symbol': ticker,
+                'company': '',
+                'cik': None,
+                'cusip': None,
+                'share_class_figi': figi,
+                'start_date': today,
+                'end_date': today
+            }
+            updated_rows.append(new_row)
+            stats['added'] += 1
+
+        # 9. Rebuild master_tb
+        if updated_rows:
+            self.master_tb = pl.DataFrame(updated_rows).cast({
+                'security_id': pl.Int64,
+                'start_date': pl.Date,
+                'end_date': pl.Date
+            })
+
+            # Ensure share_class_figi column exists
+            if 'share_class_figi' not in self.master_tb.columns:
+                self.master_tb = self.master_tb.with_columns(
+                    pl.lit(None).cast(pl.Utf8).alias('share_class_figi')
+                )
+
+        # 10. Save updated prev_universe
+        self._save_prev_universe(s3_client, bucket_name, current_nasdaq, today_str)
+
+        # 11. Export to S3
+        changes_made = stats['extended'] + stats['rebranded'] + stats['added'] + stats['delisted']
+        if changes_made > 0:
+            self.export_to_s3(s3_client, bucket_name)
+            self.logger.info(
+                f"SecurityMaster updated (no WRDS): "
+                f"{stats['extended']} extended, {stats['rebranded']} rebranded, "
+                f"{stats['added']} new IPOs, {stats['delisted']} delisted, "
+                f"{stats['unchanged']} unchanged"
+            )
+
+        return stats
+
+    def _extend_existing_securities(
+        self,
+        current_nasdaq: Set[str],
+        today: dt.date,
+        s3_client: Any,
+        bucket_name: str
+    ) -> Dict[str, int]:
+        """
+        Helper to extend end_dates for securities in current Nasdaq list.
+        Used during bootstrap when no prev_universe exists.
+        """
+        stats = {'extended': 0, 'rebranded': 0, 'added': 0, 'delisted': 0, 'unchanged': 0}
+
+        def normalize(ticker):
+            return ticker.replace('.', '').replace('-', '').upper()
+
+        current_normalized = {normalize(t) for t in current_nasdaq}
+
+        updated_rows = []
+        for row in self.master_tb.iter_rows(named=True):
+            row_dict = dict(row)
+            symbol_norm = normalize(row['symbol'])
+
+            if symbol_norm in current_normalized:
+                row_dict['end_date'] = today
+                stats['extended'] += 1
+            else:
+                stats['unchanged'] += 1
+
+            updated_rows.append(row_dict)
+
+        if updated_rows:
+            self.master_tb = pl.DataFrame(updated_rows).cast({
+                'security_id': pl.Int64,
+                'start_date': pl.Date,
+                'end_date': pl.Date
+            })
+
+        if stats['extended'] > 0:
+            self.export_to_s3(s3_client, bucket_name)
+            self.logger.info(f"Bootstrap: extended {stats['extended']} securities to {today}")
+
+        return stats
+
+    def overwrite_from_crsp(
+        self,
+        db: Any,
+        s3_client: Any,
+        bucket_name: str = 'us-equity-datalake'
+    ) -> Dict[str, int]:
+        """
+        Rebuild master_tb from CRSP data with shareClassFIGI (one-time overwrite).
+
+        1. Fetch fresh data from WRDS CRSP
+        2. Add shareClassFIGI column via OpenFIGI
+        3. Export to S3, replacing existing master_tb
+
+        :param db: WRDS database connection
+        :param s3_client: S3 client
+        :param bucket_name: S3 bucket name
+        :return: Dict with stats {'rows', 'figi_mapped'}
+        """
+        self.logger.info("Rebuilding SecurityMaster from CRSP with OpenFIGI...")
+
+        # Store old db connection
+        old_db = self.db
+        self.db = db
+
+        # Rebuild from CRSP
+        self.cik_cusip = self.cik_cusip_mapping()
+        self.master_tb = self.master_table()
+
+        # Restore db
+        self.db = old_db
+
+        # Get unique symbols
+        symbols = self.master_tb['symbol'].unique().to_list()
+        self.logger.info(f"Fetching OpenFIGI mappings for {len(symbols)} unique symbols...")
+
+        # Fetch FIGI mappings
+        figi_mapping = self._fetch_openfigi_mapping(symbols)
+
+        # Add share_class_figi column
+        self.master_tb = self.master_tb.with_columns(
+            pl.col('symbol').map_elements(
+                lambda s: figi_mapping.get(s),
+                return_dtype=pl.Utf8
+            ).alias('share_class_figi')
+        )
+
+        # Export to S3
+        self.export_to_s3(s3_client, bucket_name)
+
+        figi_count = sum(1 for v in figi_mapping.values() if v is not None)
+        stats = {
+            'rows': len(self.master_tb),
+            'figi_mapped': figi_count
+        }
+
+        self.logger.info(
+            f"CRSP rebuild complete: {stats['rows']} rows, "
+            f"{stats['figi_mapped']}/{len(symbols)} FIGIs mapped"
+        )
 
         return stats
 
