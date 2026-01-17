@@ -19,11 +19,11 @@ from quantdl.storage.rate_limiter import RateLimiter
 
 load_dotenv()
 
-# OpenFIGI rate limits: 25 req/min (no key) or 250 req/min (with key)
-OPENFIGI_RATE_LIMIT_NO_KEY = 25 / 60  # ~0.42 req/sec
-OPENFIGI_RATE_LIMIT_WITH_KEY = 250 / 60  # ~4.2 req/sec
-OPENFIGI_BATCH_SIZE = 25  # Max tickers per request (larger batches cause 413 errors)
-OPENFIGI_MIN_BATCH_SIZE = 5  # Minimum batch size before giving up
+# OpenFIGI rate limits (with API key: 25 req/6s, 100 jobs/req)
+OPENFIGI_RATE_LIMIT_NO_KEY = 25 / 60  # ~0.42 req/sec (no key)
+OPENFIGI_RATE_LIMIT_WITH_KEY = 25 / 6  # ~4.17 req/sec (with key)
+OPENFIGI_BATCH_SIZE = 100  # Max tickers per request (with API key)
+OPENFIGI_BATCH_SIZE_NO_KEY = 10  # Smaller batch without key to avoid 413
 OPENFIGI_MAX_RETRIES = 3  # Max retries per batch on transient errors
 
 
@@ -985,13 +985,8 @@ class SecurityMaster:
         Batch lookup ticker → shareClassFIGI via OpenFIGI API.
 
         API: POST https://api.openfigi.com/v3/mapping
-        Rate limit: 25 req/min (no key) or 250 req/min (with key)
-        Batch size: 25 tickers per request (reduced on 413 errors)
-
-        Features:
-        - Retry with exponential backoff on 429/5xx errors
-        - Batch size reduction on 413 (payload too large)
-        - Progress logging every 10 batches
+        With API key: 25 req/6s, 100 jobs per request
+        Without key: 25 req/min, 10 jobs per request
 
         :param tickers: List of ticker symbols
         :param rate_limiter: Optional RateLimiter instance
@@ -1000,143 +995,92 @@ class SecurityMaster:
         url = "https://api.openfigi.com/v3/mapping"
         headers = {"Content-Type": "application/json"}
 
-        # Use API key if available
+        # Use API key if available (higher rate limit and batch size)
         api_key = os.getenv("OPENFIGI_API_KEY")
         if api_key:
             headers["X-OPENFIGI-APIKEY"] = api_key
             max_rate = OPENFIGI_RATE_LIMIT_WITH_KEY
+            batch_size = OPENFIGI_BATCH_SIZE
         else:
             max_rate = OPENFIGI_RATE_LIMIT_NO_KEY
+            batch_size = OPENFIGI_BATCH_SIZE_NO_KEY
 
         # Create rate limiter if not provided
         if rate_limiter is None:
             rate_limiter = RateLimiter(max_rate=max_rate)
 
         results: Dict[str, Optional[str]] = {}
-        total_batches = (len(tickers) + OPENFIGI_BATCH_SIZE - 1) // OPENFIGI_BATCH_SIZE
-        batches_processed = 0
+        total_batches = (len(tickers) + batch_size - 1) // batch_size
 
-        self.logger.info(f"Starting OpenFIGI lookup for {len(tickers)} tickers ({total_batches} batches)")
+        self.logger.info(
+            f"Starting OpenFIGI lookup for {len(tickers)} tickers "
+            f"({total_batches} batches of {batch_size}, API key: {'yes' if api_key else 'no'})"
+        )
 
         # Process in batches
-        i = 0
-        while i < len(tickers):
-            batch = tickers[i:i + OPENFIGI_BATCH_SIZE]
-            current_batch_size = len(batch)
+        for batch_idx in range(total_batches):
+            start = batch_idx * batch_size
+            batch = tickers[start:start + batch_size]
 
             # Retry loop with exponential backoff
-            success = False
-            retry_count = 0
-            working_batch = batch
-
-            while not success and retry_count <= OPENFIGI_MAX_RETRIES:
-                # Build request payload
+            for retry in range(OPENFIGI_MAX_RETRIES + 1):
                 payload = [
                     {"idType": "TICKER", "idValue": t, "exchCode": "US"}
-                    for t in working_batch
+                    for t in batch
                 ]
 
                 try:
                     rate_limiter.acquire()
                     response = requests.post(url, json=payload, headers=headers, timeout=30)
 
-                    # Handle specific HTTP errors
-                    if response.status_code == 413:
-                        # Payload too large - reduce batch size
-                        new_size = max(len(working_batch) // 2, OPENFIGI_MIN_BATCH_SIZE)
-                        if len(working_batch) <= OPENFIGI_MIN_BATCH_SIZE:
-                            self.logger.warning(
-                                f"413 error at minimum batch size ({OPENFIGI_MIN_BATCH_SIZE}), "
-                                f"marking {len(working_batch)} tickers as unmapped"
-                            )
-                            for t in working_batch:
-                                results[t] = None
-                            success = True
-                            break
-
-                        self.logger.warning(
-                            f"413 error, reducing batch size from {len(working_batch)} to {new_size}"
-                        )
-                        # Process first half now, second half will be picked up in next iteration
-                        working_batch = working_batch[:new_size]
-                        retry_count += 1
-                        continue
-
                     if response.status_code == 429 or response.status_code >= 500:
-                        # Rate limited or server error - exponential backoff
-                        wait_time = 2 ** retry_count
-                        self.logger.warning(
-                            f"HTTP {response.status_code}, retrying in {wait_time}s "
-                            f"(attempt {retry_count + 1}/{OPENFIGI_MAX_RETRIES + 1})"
-                        )
-                        time.sleep(wait_time)
-                        retry_count += 1
-                        continue
+                        if retry < OPENFIGI_MAX_RETRIES:
+                            wait_time = 2 ** retry
+                            self.logger.warning(
+                                f"HTTP {response.status_code}, retry {retry + 1}/{OPENFIGI_MAX_RETRIES} in {wait_time}s"
+                            )
+                            time.sleep(wait_time)
+                            continue
+                        # Exhausted retries
+                        for t in batch:
+                            results[t] = None
+                        break
 
                     response.raise_for_status()
                     data = response.json()
 
-                    # Parse response - each item corresponds to a ticker
+                    # Parse response
                     for j, item in enumerate(data):
-                        ticker = working_batch[j]
+                        ticker = batch[j]
                         if "data" in item and item["data"]:
-                            figi = item["data"][0].get("shareClassFIGI")
-                            results[ticker] = figi
+                            results[ticker] = item["data"][0].get("shareClassFIGI")
                         else:
                             results[ticker] = None
-
-                    success = True
-
-                    # If we reduced batch size, process remaining tickers from original batch
-                    if len(working_batch) < current_batch_size:
-                        remaining = batch[len(working_batch):]
-                        if remaining:
-                            # Insert remaining at front of unprocessed tickers
-                            tickers = tickers[:i] + remaining + tickers[i + OPENFIGI_BATCH_SIZE:]
-                            # Adjust total batches estimate
-                            total_batches = (len(tickers) - i + OPENFIGI_BATCH_SIZE - 1) // OPENFIGI_BATCH_SIZE + batches_processed
+                    break  # Success
 
                 except requests.RequestException as e:
-                    if retry_count < OPENFIGI_MAX_RETRIES:
-                        wait_time = 2 ** retry_count
-                        self.logger.warning(
-                            f"Request error: {e}, retrying in {wait_time}s "
-                            f"(attempt {retry_count + 1}/{OPENFIGI_MAX_RETRIES + 1})"
-                        )
+                    if retry < OPENFIGI_MAX_RETRIES:
+                        wait_time = 2 ** retry
+                        self.logger.warning(f"Request error: {e}, retry {retry + 1}/{OPENFIGI_MAX_RETRIES} in {wait_time}s")
                         time.sleep(wait_time)
-                        retry_count += 1
                     else:
-                        self.logger.warning(
-                            f"OpenFIGI batch failed after {OPENFIGI_MAX_RETRIES + 1} attempts: {e}"
-                        )
-                        for t in working_batch:
+                        self.logger.warning(f"Batch failed after {OPENFIGI_MAX_RETRIES + 1} attempts: {e}")
+                        for t in batch:
                             results[t] = None
-                        success = True
 
                 except Exception as e:
-                    self.logger.error(f"Unexpected error in OpenFIGI lookup: {e}")
-                    for t in working_batch:
+                    self.logger.error(f"Unexpected error: {e}")
+                    for t in batch:
                         results[t] = None
-                    success = True
-
-            # Mark exhausted retries
-            if not success:
-                self.logger.warning(
-                    f"Batch exhausted retries, marking {len(working_batch)} tickers as unmapped"
-                )
-                for t in working_batch:
-                    results[t] = None
-
-            i += OPENFIGI_BATCH_SIZE
-            batches_processed += 1
+                    break
 
             # Progress logging every 10 batches
-            if batches_processed % 10 == 0 or batches_processed == total_batches:
-                pct = (batches_processed / total_batches) * 100
-                self.logger.info(f"OpenFIGI progress: {batches_processed}/{total_batches} batches ({pct:.0f}%)")
+            if (batch_idx + 1) % 10 == 0 or batch_idx + 1 == total_batches:
+                pct = ((batch_idx + 1) / total_batches) * 100
+                self.logger.info(f"OpenFIGI progress: {batch_idx + 1}/{total_batches} batches ({pct:.0f}%)")
 
         found = sum(1 for v in results.values() if v is not None)
-        self.logger.info(f"OpenFIGI lookup complete: {found}/{len(results)} tickers mapped to FIGIs")
+        self.logger.info(f"OpenFIGI lookup complete: {found}/{len(results)} tickers mapped")
 
         return results
 

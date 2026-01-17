@@ -695,15 +695,17 @@ class DailyUpdateAppNoWRDS:
         self.logger.info(f"Starting daily update for {target_date} (WRDS-free mode)")
         self.logger.info(f"=" * 80)
 
-        # Update SecurityMaster from SEC (extend end_dates for active securities)
-        self.logger.info("Updating SecurityMaster from SEC...")
-        sm_stats = self.security_master.update_from_sec(
+        # Update SecurityMaster using Nasdaq + OpenFIGI (no WRDS required)
+        self.logger.info("Updating SecurityMaster (Nasdaq + OpenFIGI)...")
+        sm_stats = self.security_master.update_no_wrds(
             s3_client=self.s3_client,
-            bucket_name='us-equity-datalake'
+            bucket_name='us-equity-datalake',
+            grace_period_days=14
         )
         self.logger.info(
             f"SecurityMaster: {sm_stats['extended']} extended, "
-            f"{sm_stats['added']} added, {sm_stats['unchanged']} unchanged"
+            f"{sm_stats['rebranded']} rebranded, {sm_stats['added']} new IPOs, "
+            f"{sm_stats['delisted']} delisted, {sm_stats['unchanged']} unchanged"
         )
 
         # Get current universe

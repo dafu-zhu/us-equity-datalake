@@ -1060,7 +1060,7 @@ class TestDailyUpdateAppNoWRDSRunDailyUpdate:
         )
 
         # Verify all steps were called
-        app.security_master.update_from_sec.assert_called_once()
+        app.security_master.update_no_wrds.assert_called_once()
         app.check_market_open.assert_called_once_with(target_date)
         app.update_daily_ticks.assert_called_once()
         app.update_minute_ticks.assert_called_once()

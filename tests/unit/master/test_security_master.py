@@ -1884,18 +1884,20 @@ class TestOpenFIGIIntegration:
         sm.logger.error.assert_called()
 
     def test_fetch_openfigi_mapping_batching(self):
-        """Test _fetch_openfigi_mapping handles batching correctly."""
+        """Test _fetch_openfigi_mapping handles batching correctly with API key."""
         sm = SecurityMaster.__new__(SecurityMaster)
         sm.logger = Mock()
 
-        # Create 150 tickers to test batching (should result in 6 batches of 25)
-        tickers = [f'SYM{i:03d}' for i in range(150)]
+        # Create 250 tickers to test batching (with API key: 100 per batch = 3 batches)
+        tickers = [f'SYM{i:03d}' for i in range(250)]
 
         call_count = 0
         def mock_post(*args, **kwargs):
             nonlocal call_count
             call_count += 1
             mock_resp = Mock()
+            mock_resp.status_code = 200
+            mock_resp.raise_for_status = Mock()
             batch_size = len(kwargs.get('json', []))
             mock_resp.json.return_value = [
                 {"data": [{"shareClassFIGI": f"FIGI{i}"}]}
@@ -1903,14 +1905,15 @@ class TestOpenFIGIIntegration:
             ]
             return mock_resp
 
-        with patch('quantdl.master.security_master.requests.post', side_effect=mock_post):
-            with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
-                mock_rl.return_value.acquire = Mock()
-                result = sm._fetch_openfigi_mapping(tickers)
+        with patch.dict(os.environ, {'OPENFIGI_API_KEY': 'test-key'}):
+            with patch('quantdl.master.security_master.requests.post', side_effect=mock_post):
+                with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
+                    mock_rl.return_value.acquire = Mock()
+                    result = sm._fetch_openfigi_mapping(tickers)
 
-        # Should have made 6 API calls (25 * 6 = 150 tickers)
-        assert call_count == 6
-        assert len(result) == 150
+        # With API key: 100 per batch, 250 tickers = 3 batches
+        assert call_count == 3
+        assert len(result) == 250
 
     def test_fetch_openfigi_uses_api_key_when_available(self):
         """Test _fetch_openfigi_mapping uses API key from environment."""
@@ -2285,70 +2288,7 @@ class TestOverwriteFromCRSP:
 
 
 class TestOpenFIGIRetryBehavior:
-    """Test OpenFIGI 413 retry and backoff behavior"""
-
-    def test_fetch_openfigi_413_reduces_batch_size(self):
-        """Test _fetch_openfigi_mapping reduces batch size on 413 error."""
-        sm = SecurityMaster.__new__(SecurityMaster)
-        sm.logger = Mock()
-
-        call_count = 0
-        batch_sizes = []
-
-        def mock_post(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            batch_size = len(kwargs.get('json', []))
-            batch_sizes.append(batch_size)
-
-            mock_resp = Mock()
-            # First call: return 413
-            if call_count == 1:
-                mock_resp.status_code = 413
-                return mock_resp
-            # Second call (reduced batch): succeed
-            mock_resp.status_code = 200
-            mock_resp.raise_for_status = Mock()
-            mock_resp.json.return_value = [
-                {"data": [{"shareClassFIGI": f"FIGI{i}"}]}
-                for i in range(batch_size)
-            ]
-            return mock_resp
-
-        tickers = [f'SYM{i:02d}' for i in range(10)]
-
-        with patch('quantdl.master.security_master.requests.post', side_effect=mock_post):
-            with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
-                mock_rl.return_value.acquire = Mock()
-                result = sm._fetch_openfigi_mapping(tickers)
-
-        # Should have reduced batch size on 413
-        assert batch_sizes[0] == 10
-        assert batch_sizes[1] < 10  # Reduced
-        sm.logger.warning.assert_called()
-
-    def test_fetch_openfigi_413_at_min_batch_marks_none(self):
-        """Test _fetch_openfigi_mapping marks tickers as None when at min batch size."""
-        from quantdl.master.security_master import OPENFIGI_MIN_BATCH_SIZE
-        sm = SecurityMaster.__new__(SecurityMaster)
-        sm.logger = Mock()
-
-        def mock_post(*args, **kwargs):
-            mock_resp = Mock()
-            mock_resp.status_code = 413
-            return mock_resp
-
-        # Use exactly min batch size
-        tickers = [f'SYM{i}' for i in range(OPENFIGI_MIN_BATCH_SIZE)]
-
-        with patch('quantdl.master.security_master.requests.post', side_effect=mock_post):
-            with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
-                mock_rl.return_value.acquire = Mock()
-                result = sm._fetch_openfigi_mapping(tickers)
-
-        # All tickers should be marked None
-        assert all(v is None for v in result.values())
-        assert len(result) == OPENFIGI_MIN_BATCH_SIZE
+    """Test OpenFIGI retry and backoff behavior"""
 
     def test_fetch_openfigi_429_retries_with_backoff(self):
         """Test _fetch_openfigi_mapping retries on 429 with exponential backoff."""
@@ -2436,8 +2376,9 @@ class TestOpenFIGIRetryBehavior:
         sm = SecurityMaster.__new__(SecurityMaster)
         sm.logger = Mock()
 
-        # Create enough tickers for multiple batches (25 per batch)
-        tickers = [f'SYM{i:03d}' for i in range(300)]  # 12 batches
+        # With API key: 100 per batch. 1500 tickers = 15 batches
+        # Should log at batch 10 and 15 (final)
+        tickers = [f'SYM{i:04d}' for i in range(1500)]
 
         def mock_post(*args, **kwargs):
             mock_resp = Mock()
@@ -2450,12 +2391,13 @@ class TestOpenFIGIRetryBehavior:
             ]
             return mock_resp
 
-        with patch('quantdl.master.security_master.requests.post', side_effect=mock_post):
-            with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
-                mock_rl.return_value.acquire = Mock()
-                result = sm._fetch_openfigi_mapping(tickers)
+        with patch.dict(os.environ, {'OPENFIGI_API_KEY': 'test-key'}):
+            with patch('quantdl.master.security_master.requests.post', side_effect=mock_post):
+                with patch('quantdl.master.security_master.RateLimiter') as mock_rl:
+                    mock_rl.return_value.acquire = Mock()
+                    result = sm._fetch_openfigi_mapping(tickers)
 
-        # Check progress logging (should log at batch 10, 12)
+        # Check progress logging (should log at batch 10, 15)
         info_calls = [str(call) for call in sm.logger.info.call_args_list]
         progress_logs = [c for c in info_calls if 'progress' in c.lower()]
         assert len(progress_logs) >= 2  # At least 10th batch and final
