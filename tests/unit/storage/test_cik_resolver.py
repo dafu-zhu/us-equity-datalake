@@ -34,7 +34,7 @@ class TestCIKResolver:
 
         cik = resolver.get_cik(symbol="AAPL", date="2024-06-30", year=2024)
 
-        assert cik == "320193"
+        assert cik == "0000320193"
         security_master.get_security_id.assert_called_once_with(
             symbol="AAPL",
             day="2024-06-30",
@@ -71,7 +71,7 @@ class TestCIKResolver:
 
         cik = resolver.get_cik(symbol="AAPL", date="2024-01-15", year=2024)
 
-        assert cik == "320193"
+        assert cik == "0000320193"
 
     def test_get_cik_prefers_sec_mapping_for_2025_plus(self):
         """Uses SEC mapping when year is 2025+."""
@@ -101,7 +101,7 @@ class TestCIKResolver:
 
         cik = resolver.get_cik(symbol="AAPL", date="2025-06-30", year=2025)
 
-        assert cik == "320193"
+        assert cik == "0000320193"
         logger.debug.assert_called()
 
     def test_get_cik_value_error_logs_warning(self):
@@ -172,7 +172,7 @@ class TestCIKResolver:
 
         cik = resolver.get_cik(symbol="AAPL", date="2024-06-30", year=2024)
 
-        assert cik == "320193"
+        assert cik == "0000320193"
         # Should have called get_security_id twice
         assert security_master.get_security_id.call_count == 2
 
@@ -197,7 +197,7 @@ class TestCIKResolver:
 
         cik = resolver.get_cik(symbol="AAPL", date="2024-06-30", year=2024)
 
-        assert cik == "320193"
+        assert cik == "0000320193"
         # Should have tried both dates
         assert security_master.get_security_id.call_count == 2
 
