@@ -113,7 +113,7 @@ class CIKResolver:
                     return None
 
                 # Success! Convert to zero-padded string
-                cik_str = str(int(cik_value))
+                cik_str = str(int(cik_value)).zfill(10)
                 if try_date != date:
                     self.logger.debug(
                         f"Found CIK for {symbol} using fallback date {try_date} (primary: {date})"
