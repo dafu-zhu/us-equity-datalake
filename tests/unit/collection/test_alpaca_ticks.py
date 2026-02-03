@@ -437,43 +437,75 @@ class TestGetMonthRange:
     @patch.dict('os.environ', {'ALPACA_API_KEY': 'test_key', 'ALPACA_API_SECRET': 'test_secret'})
     @patch('quantdl.collection.alpaca_ticks.LoggerFactory')
     def test_get_month_range_january(self, mock_logger_factory):
-        """Test month range for January"""
+        """Test month range for January - uses ET boundaries converted to UTC"""
+        import datetime as dt
+        import zoneinfo
+
         mock_logger = Mock()
         mock_logger_factory.return_value.get_logger.return_value = mock_logger
 
         ticks = Ticks()
         start_str, end_str = ticks._get_month_range(2024, 1)
 
-        assert '2024-01-01' in start_str
-        assert '2024-01-31' in end_str
+        # Parse UTC strings back to ET to verify correct boundaries
+        eastern = zoneinfo.ZoneInfo("America/New_York")
+        start_utc = dt.datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+        end_utc = dt.datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+        start_et = start_utc.astimezone(eastern)
+        end_et = end_utc.astimezone(eastern)
+
+        # Start should be 4:00 AM ET on Jan 1
+        assert start_et.date() == dt.date(2024, 1, 1)
+        assert start_et.hour == 4
+        # End should be 8:00 PM ET on Jan 31
+        assert end_et.date() == dt.date(2024, 1, 31)
+        assert end_et.hour == 20
         assert start_str.endswith('Z')
         assert end_str.endswith('Z')
 
     @patch.dict('os.environ', {'ALPACA_API_KEY': 'test_key', 'ALPACA_API_SECRET': 'test_secret'})
     @patch('quantdl.collection.alpaca_ticks.LoggerFactory')
     def test_get_month_range_february_leap(self, mock_logger_factory):
-        """Test month range for February in leap year"""
+        """Test month range for February in leap year - uses ET boundaries"""
+        import datetime as dt
+        import zoneinfo
+
         mock_logger = Mock()
         mock_logger_factory.return_value.get_logger.return_value = mock_logger
 
         ticks = Ticks()
         start_str, end_str = ticks._get_month_range(2024, 2)
 
-        assert '2024-02-01' in start_str
-        assert '2024-02-29' in end_str
+        eastern = zoneinfo.ZoneInfo("America/New_York")
+        start_utc = dt.datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+        end_utc = dt.datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+        start_et = start_utc.astimezone(eastern)
+        end_et = end_utc.astimezone(eastern)
+
+        assert start_et.date() == dt.date(2024, 2, 1)
+        assert end_et.date() == dt.date(2024, 2, 29)  # Leap year
 
     @patch.dict('os.environ', {'ALPACA_API_KEY': 'test_key', 'ALPACA_API_SECRET': 'test_secret'})
     @patch('quantdl.collection.alpaca_ticks.LoggerFactory')
     def test_get_month_range_december(self, mock_logger_factory):
-        """Test month range for December"""
+        """Test month range for December - uses ET boundaries"""
+        import datetime as dt
+        import zoneinfo
+
         mock_logger = Mock()
         mock_logger_factory.return_value.get_logger.return_value = mock_logger
 
         ticks = Ticks()
         start_str, end_str = ticks._get_month_range(2024, 12)
 
-        assert '2024-12-01' in start_str
-        assert '2024-12-31' in end_str
+        eastern = zoneinfo.ZoneInfo("America/New_York")
+        start_utc = dt.datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+        end_utc = dt.datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+        start_et = start_utc.astimezone(eastern)
+        end_et = end_utc.astimezone(eastern)
+
+        assert start_et.date() == dt.date(2024, 12, 1)
+        assert end_et.date() == dt.date(2024, 12, 31)
 
 
 class TestGetDaily:

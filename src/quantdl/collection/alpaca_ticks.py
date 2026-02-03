@@ -388,24 +388,30 @@ class Ticks:
 
     def _get_month_range(self, year: int, month: int) -> tuple[str, str]:
         """
-        Calculate UTC time range for a given month.
+        Calculate UTC time range for a given month based on ET market hours.
+        Uses 4:00 AM ET start (pre-market) to 8:00 PM ET end (after-hours) to cover
+        extended hours if needed, while ensuring correct date boundaries.
 
         :param year: Year
         :param month: Month (1-12)
         :return: Tuple of (start_str, end_str) in ISO format with 'Z' suffix
         """
+        eastern = zoneinfo.ZoneInfo("America/New_York")
+
         start_date = dt.date(year, month, 1)
         if month == 12:
             end_date = dt.date(year, 12, 31)
         else:
             end_date = dt.date(year, month + 1, 1) - dt.timedelta(days=1)
 
-        start_str = dt.datetime.combine(
-            start_date, dt.time(0, 0), tzinfo=dt.timezone.utc
-        ).isoformat().replace("+00:00", "Z")
-        end_str = dt.datetime.combine(
-            end_date, dt.time(23, 59, 59), tzinfo=dt.timezone.utc
-        ).isoformat().replace("+00:00", "Z")
+        # Use ET boundaries and convert to UTC
+        # Start at 4:00 AM ET (pre-market start) on first day
+        start_et = dt.datetime.combine(start_date, dt.time(4, 0), tzinfo=eastern)
+        # End at 8:00 PM ET (after-hours end) on last day
+        end_et = dt.datetime.combine(end_date, dt.time(20, 0), tzinfo=eastern)
+
+        start_str = start_et.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        end_str = end_et.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
         return start_str, end_str
 

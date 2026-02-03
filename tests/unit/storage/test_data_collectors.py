@@ -406,6 +406,50 @@ class TestTicksDataCollector:
         assert result[("AAPL", "2024-06-03")].is_empty()
         mock_logger.error.assert_called()
 
+    def test_parse_minute_bars_to_daily_nanosecond_timestamps(self):
+        """Alpaca returns RFC-3339 timestamps with nanoseconds - verify parsing works."""
+        from quantdl.storage.data_collectors import TicksDataCollector
+        from quantdl.collection.models import TickField
+
+        collector = TicksDataCollector(
+            crsp_ticks=Mock(),
+            alpaca_ticks=Mock(),
+            alpaca_headers={},
+            logger=Mock(spec=logging.Logger)
+        )
+        # Alpaca returns timestamps with nanosecond precision
+        bars = [
+            {
+                TickField.TIMESTAMP.value: "2024-06-03T14:30:00.123456789Z",
+                TickField.OPEN.value: 1.0,
+                TickField.HIGH.value: 1.1,
+                TickField.LOW.value: 0.9,
+                TickField.CLOSE.value: 1.0,
+                TickField.VOLUME.value: 100,
+                TickField.NUM_TRADES.value: 5000,  # High num_trades = regular hours
+                TickField.VWAP.value: 1.02
+            },
+            {
+                TickField.TIMESTAMP.value: "2024-06-03T15:30:00.987654321Z",
+                TickField.OPEN.value: 1.1,
+                TickField.HIGH.value: 1.2,
+                TickField.LOW.value: 1.0,
+                TickField.CLOSE.value: 1.15,
+                TickField.VOLUME.value: 200,
+                TickField.NUM_TRADES.value: 8000,
+                TickField.VWAP.value: 1.12
+            }
+        ]
+
+        result = collector.parse_minute_bars_to_daily({"AAPL": bars}, ["2024-06-03"])
+
+        # Both bars should be parsed (not dropped due to nanoseconds)
+        assert len(result[("AAPL", "2024-06-03")]) == 2
+        # Verify timestamps are converted to ET (14:30 UTC = 10:30 ET during summer)
+        df = result[("AAPL", "2024-06-03")]
+        assert df["num_trades"][0] == 5000
+        assert df["num_trades"][1] == 8000
+
     def test_collect_daily_ticks_month_filters_correctly(self):
         """Test that collect_daily_ticks_month calls month-specific API for Alpaca (2025+)"""
         from quantdl.storage.data_collectors import TicksDataCollector

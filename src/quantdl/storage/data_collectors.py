@@ -327,6 +327,8 @@ class TicksDataCollector(DataCollector):
                 vwaps = [bar[TickField.VWAP.value] for bar in bars]
 
                 # Create DataFrame and process with vectorized operations
+                # Alpaca returns RFC-3339 timestamps with nanoseconds (e.g., "2024-01-03T14:30:00.123456789Z")
+                # Strip nanoseconds to seconds precision before parsing
                 all_bars_df = pl.DataFrame({
                     'timestamp_utc': timestamps,
                     'open': opens,
@@ -337,17 +339,17 @@ class TicksDataCollector(DataCollector):
                     'num_trades': num_trades_list,
                     'vwap': vwaps
                 }, strict=False).with_columns([
-                    # Parse timestamp: UTC -> ET, remove timezone
-                    # Use strptime with explicit format and timezone to handle 'Z' marker
+                    # Strip fractional seconds: "2024-01-03T14:30:00.123456789Z" -> "2024-01-03T14:30:00Z"
                     pl.col('timestamp_utc')
+                        .str.replace(r'\.\d+Z$', 'Z')
+                        .alias('timestamp_clean')
+                ]).with_columns([
+                    # Parse timestamp: UTC -> ET, remove timezone
+                    pl.col('timestamp_clean')
                         .str.strptime(pl.Datetime('us', 'UTC'), format='%Y-%m-%dT%H:%M:%SZ')
                         .dt.convert_time_zone('America/New_York')
                         .dt.replace_time_zone(None)
                         .alias('timestamp'),
-                    # Extract trade date for filtering by day (fast string slice)
-                    pl.col('timestamp_utc')
-                        .str.slice(0, 10)  # Just extract 'YYYY-MM-DD' from '2024-01-03T14:30:00Z'
-                        .alias('trade_date'),
                     # Cast types (vectorized)
                     pl.col('open').cast(pl.Float64),
                     pl.col('high').cast(pl.Float64),
@@ -356,7 +358,10 @@ class TicksDataCollector(DataCollector):
                     pl.col('volume').cast(pl.Int64),
                     pl.col('num_trades').cast(pl.Int64),
                     pl.col('vwap').cast(pl.Float64)
-                ]).drop('timestamp_utc')
+                ]).drop(['timestamp_utc', 'timestamp_clean']).with_columns([
+                    # Extract trade date from ET timestamp (not UTC!) for correct day grouping
+                    pl.col('timestamp').dt.date().cast(pl.Utf8).alias('trade_date')
+                ])
 
                 # Process each trading day by filtering
                 for day in trading_days:
