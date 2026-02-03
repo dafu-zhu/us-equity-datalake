@@ -109,8 +109,16 @@ class FinBERTModel(SentimentModel):
         self._logger.info(f"Loading FinBERT from {self.MODEL_ID}...")
 
         # Load tokenizer and model
+        # Suppress position_ids UNEXPECTED warning - harmless mismatch where newer
+        # transformers computes position_ids dynamically instead of storing as buffer
+        import transformers
+        prev_verbosity = transformers.logging.get_verbosity()
+        transformers.logging.set_verbosity_error()
+
         self._tokenizer = AutoTokenizer.from_pretrained(self.MODEL_ID)
         self._model = AutoModelForSequenceClassification.from_pretrained(self.MODEL_ID)
+
+        transformers.logging.set_verbosity(prev_verbosity)
 
         # Move to device
         if device == "cuda":
