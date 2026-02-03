@@ -11,6 +11,7 @@ US Equity Data Lake: Self-hosted, automated market data infrastructure for US eq
 - Minute ticks: Alpaca API (2016+)
 - Fundamentals: SEC EDGAR JSON API (2009+)
 - Derived metrics: ROA, ROE, TTM calculations
+- Sentiment: NLP analysis of MD&A sections (FinBERT, 2009+)
 
 ## Commands
 
@@ -44,6 +45,7 @@ uv run quantdl-storage --run-fundamental
 uv run quantdl-storage --run-daily-ticks
 uv run quantdl-storage --run-minute-ticks
 uv run quantdl-storage --run-derived-fundamental
+uv run quantdl-storage --run-sentiment            # NLP sentiment from SEC filings
 
 # Daily update (incremental)
 uv run quantdl-update --date 2025-01-10
@@ -90,6 +92,11 @@ uv run quantdl-export-security-master --export --force-rebuild  # skip S3 cache
 **5. Derived Data** (`src/quantdl/derived/`)
 - `ttm.py`: Computes trailing-twelve-month (TTM) fundamentals
 - `metrics.py`: Computes derived metrics (ROA, ROE, leverage ratios, etc.)
+- `sentiment.py`: Computes sentiment metrics from MD&A text using FinBERT
+
+**5a. Models** (`src/quantdl/models/`)
+- `base.py`: SentimentModel ABC, SentimentResult dataclass
+- `finbert.py`: FinBERT implementation (ProsusAI/finbert) with CUDA support
 
 **6. Update Apps** (`src/quantdl/update/`)
 - `app.py`: `DailyUpdateApp` orchestrates daily incremental updates
@@ -137,9 +144,10 @@ data/raw/
 │   └── minute/{symbol}/{YYYY}/{MM}/{DD}/ticks.parquet
 ├── fundamental/{cik}/fundamental.parquet
 data/derived/
-└── features/fundamental/{cik}/
-    ├── ttm.parquet
-    └── metrics.parquet
+├── features/fundamental/{cik}/
+│   ├── ttm.parquet
+│   └── metrics.parquet
+└── features/sentiment/{cik}/sentiment.parquet
 ```
 
 **Storage Strategy:**

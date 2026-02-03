@@ -1576,6 +1576,196 @@ class UploadApp:
             f"Avg rate={avg_rate:.2f} sym/sec"
         )
 
+    def upload_sentiment(
+        self,
+        start_date: str,
+        end_date: str,
+        overwrite: bool = False
+    ):
+        """
+        Upload sentiment data for all symbols for a date range.
+
+        Uses FinBERT for sentiment analysis of MD&A sections from 10-K/10-Q filings.
+        Processing is sequential per symbol (GPU inference is the bottleneck).
+        SEC API calls use rate limiting (10 req/sec).
+
+        Storage: data/derived/features/sentiment/{cik}/sentiment.parquet
+
+        :param start_date: Start date (YYYY-MM-DD)
+        :param end_date: End date (YYYY-MM-DD)
+        :param overwrite: If True, overwrite existing data
+        """
+        from quantdl.collection.sentiment import SentimentCollector
+        from quantdl.derived.sentiment import compute_sentiment_for_cik
+        from quantdl.models.finbert import FinBERTModel
+        import io
+
+        start_time = time.time()
+        start_year = int(start_date[:4])
+        end_year = int(end_date[:4])
+
+        # Build symbol list from universe
+        symbol_reference_year = {}
+        for year in range(start_year, end_year + 1):
+            symbols = self.universe_manager.load_symbols_for_year(year, sym_type='alpaca')
+            for sym in symbols:
+                if sym not in symbol_reference_year:
+                    symbol_reference_year[sym] = year
+
+        alpaca_symbols = list(symbol_reference_year.keys())
+        total = len(alpaca_symbols)
+
+        self.logger.info(
+            f"Starting sentiment upload for {total} symbols "
+            f"from {start_date} to {end_date}"
+        )
+        self.logger.info("Storage: data/derived/features/sentiment/{cik}/sentiment.parquet")
+        self.logger.info("Model: FinBERT (ProsusAI/finbert)")
+
+        # Step 1: Pre-fetch CIKs
+        self.logger.info("Step 1/4: Pre-fetching CIKs...")
+        prefetch_start = time.time()
+        cik_map = {}
+        for year in range(start_year, end_year + 1):
+            year_symbols = [
+                sym for sym, ref_year in symbol_reference_year.items()
+                if ref_year == year
+            ]
+            if year_symbols:
+                cik_map.update(
+                    self.cik_resolver.batch_prefetch_ciks(year_symbols, year, batch_size=100)
+                )
+        prefetch_time = time.time() - prefetch_start
+        self.logger.info(f"CIK pre-fetch completed in {prefetch_time:.1f}s")
+
+        # Step 2: Filter symbols with valid CIKs
+        self.logger.info("Step 2/4: Filtering symbols with valid CIKs...")
+        symbols_with_cik = [sym for sym in alpaca_symbols if cik_map.get(sym)]
+        self.logger.info(f"Found {len(symbols_with_cik)}/{total} symbols with CIKs")
+
+        if not symbols_with_cik:
+            self.logger.warning("No symbols with CIKs found, skipping sentiment upload")
+            return
+
+        # Step 3: Load FinBERT model
+        self.logger.info("Step 3/4: Loading FinBERT model...")
+        model_start = time.time()
+        model = FinBERTModel(logger=self.logger)
+        model.load()
+        model_time = time.time() - model_start
+        self.logger.info(f"Model loaded in {model_time:.1f}s")
+
+        # Step 4: Process symbols sequentially (GPU inference is bottleneck)
+        self.logger.info(f"Step 4/4: Processing {len(symbols_with_cik)} symbols...")
+
+        # Initialize sentiment collector with rate limiter (10 req/sec)
+        rate_limiter = RateLimiter(max_rate=10.0)
+        collector = SentimentCollector(
+            rate_limiter=rate_limiter,
+            logger=self.logger
+        )
+
+        success = 0
+        failed = 0
+        skipped = 0
+
+        fetch_start = time.time()
+
+        try:
+            pbar = tqdm(symbols_with_cik, desc="Sentiment", unit="sym")
+            for sym in pbar:
+                cik = cik_map.get(sym)
+                if not cik:
+                    skipped += 1
+                    continue
+
+                # Check if exists
+                key = f"data/derived/features/sentiment/{cik}/sentiment.parquet"
+                if not overwrite:
+                    try:
+                        self.client.head_object(Bucket=self.config.bucket, Key=key)
+                        skipped += 1
+                        pbar.set_postfix(ok=success, fail=failed, skip=skipped)
+                        continue
+                    except:
+                        pass
+
+                try:
+                    # Get filing metadata
+                    filings = collector.get_filings_metadata(
+                        cik=cik,
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+
+                    if not filings:
+                        skipped += 1
+                        pbar.set_postfix(ok=success, fail=failed, skip=skipped)
+                        continue
+
+                    # Extract MD&A texts
+                    filing_texts = collector.collect_filing_texts(
+                        cik=cik,
+                        filings=filings
+                    )
+
+                    if not filing_texts:
+                        skipped += 1
+                        pbar.set_postfix(ok=success, fail=failed, skip=skipped)
+                        continue
+
+                    # Compute sentiment
+                    sentiment_df = compute_sentiment_for_cik(
+                        cik=cik,
+                        filing_texts=filing_texts,
+                        model=model,
+                        symbol=sym,
+                        logger=self.logger
+                    )
+
+                    if len(sentiment_df) == 0:
+                        skipped += 1
+                        pbar.set_postfix(ok=success, fail=failed, skip=skipped)
+                        continue
+
+                    # Upload to S3
+                    buffer = io.BytesIO()
+                    sentiment_df.write_parquet(buffer)
+                    buffer.seek(0)
+
+                    self.client.put_object(
+                        Bucket=self.config.bucket,
+                        Key=key,
+                        Body=buffer.getvalue()
+                    )
+
+                    success += 1
+                    pbar.set_postfix(ok=success, fail=failed, skip=skipped)
+
+                except Exception as e:
+                    self.logger.debug(f"Failed to process {sym}: {e}")
+                    failed += 1
+                    pbar.set_postfix(ok=success, fail=failed, skip=skipped)
+
+        finally:
+            # Unload model to free GPU memory
+            model.unload()
+            self.logger.info("Model unloaded")
+
+        total_time = time.time() - start_time
+        fetch_time = time.time() - fetch_start
+        processed = len(symbols_with_cik)
+        avg_rate = processed / fetch_time if fetch_time > 0 else 0
+
+        self.logger.info(
+            f"Sentiment upload for {start_date} to {end_date} completed in {total_time:.1f}s: "
+            f"{success} success, {failed} failed, {skipped} skipped out of {processed} total"
+        )
+        self.logger.info(
+            f"Performance: CIK fetch={prefetch_time:.1f}s, Model load={model_time:.1f}s, "
+            f"Processing={fetch_time:.1f}s, Avg rate={avg_rate:.2f} sym/sec"
+        )
+
     def run(
             self,
             start_year: int,
@@ -1594,6 +1784,7 @@ class UploadApp:
             run_daily_ticks: bool=False,
             run_minute_ticks: bool=False,
             run_top_3000: bool=False,
+            run_sentiment: bool=False,
             run_all: bool=False
         ) -> None:
         """
@@ -1630,6 +1821,7 @@ class UploadApp:
             run_daily_ticks = True
             run_minute_ticks = True
             run_top_3000 = True
+            run_sentiment = True
 
         # Upload daily ticks (CRSP bulk for historical, year-by-year for current)
         if run_daily_ticks:
@@ -1702,6 +1894,14 @@ class UploadApp:
                 f"Uploading derived fundamental data for {start_date} to {end_date}"
             )
             self.upload_derived_fundamental(start_date, end_date, max_workers, overwrite)
+
+        if run_sentiment:
+            # Sentiment data only available from 2017+ (per user spec)
+            sentiment_start = max(start_date, "2017-01-01")
+            self.logger.info(
+                f"Uploading sentiment data for {sentiment_start} to {end_date}"
+            )
+            self.upload_sentiment(sentiment_start, end_date, overwrite)
 
     def upload_top_3000_monthly(
         self,

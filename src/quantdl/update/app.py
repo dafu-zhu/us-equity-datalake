@@ -817,6 +817,165 @@ class DailyUpdateApp:
 
         return stats
 
+    def update_sentiment(
+        self,
+        symbols: List[str],
+        end_date: str,
+    ) -> Dict[str, int]:
+        """
+        Update sentiment data for symbols with new 10-K/10-Q filings.
+
+        Uses read-check-append pattern:
+        1. Fetch MD&A text from new filings
+        2. Compute sentiment using FinBERT
+        3. Read existing sentiment.parquet (if exists)
+        4. Check if filing already has sentiment computed
+        5. Append new sentiment data and write back
+
+        Storage: data/derived/features/sentiment/{cik}/sentiment.parquet
+
+        :param symbols: List of symbols to update
+        :param end_date: End date (YYYY-MM-DD)
+        :return: Dict with statistics
+        """
+        from quantdl.collection.sentiment import SentimentCollector
+        from quantdl.derived.sentiment import compute_sentiment_long
+        from quantdl.models.finbert import FinBERTModel
+        from quantdl.storage.rate_limiter import RateLimiter
+        import io
+
+        self.logger.info(f"Updating sentiment for {len(symbols)} symbols")
+
+        # Load FinBERT model (GPU-accelerated)
+        self.logger.info("Loading FinBERT model...")
+        model = FinBERTModel()
+        model.load()
+        self.logger.info(f"FinBERT loaded on {model._device}")
+
+        # Initialize collector with rate limiter (10 req/sec)
+        rate_limiter = RateLimiter(max_rate=10.0)
+        collector = SentimentCollector(
+            rate_limiter=rate_limiter,
+            logger=self.logger
+        )
+
+        stats = {'success': 0, 'failed': 0, 'skipped': 0}
+
+        for sym in tqdm(symbols, desc="Sentiment update", unit="sym"):
+            try:
+                # Resolve symbol to CIK
+                cik = self.cik_resolver.get_cik(sym, end_date)
+                if not cik:
+                    self.logger.debug(f"No CIK found for {sym}")
+                    stats['skipped'] += 1
+                    continue
+
+                # Get filing metadata for this CIK
+                filings = collector.get_filings_metadata(cik)
+                if not filings:
+                    self.logger.debug(f"No filings found for {sym} (CIK {cik})")
+                    stats['skipped'] += 1
+                    continue
+
+                # Read existing sentiment data (if exists)
+                s3_key = f"data/derived/features/sentiment/{cik}/sentiment.parquet"
+                existing_accessions = set()
+                existing_df = None
+
+                try:
+                    response = self.s3_client.get_object(
+                        Bucket='us-equity-datalake',
+                        Key=s3_key
+                    )
+                    existing_df = pl.read_parquet(response['Body'])
+                    # Get unique accession numbers already processed
+                    if 'accession_number' in existing_df.columns:
+                        existing_accessions = set(
+                            existing_df.select('accession_number').unique().to_series().to_list()
+                        )
+                except (ClientError, NoSuchKeyError):
+                    pass  # No existing file, will create new
+
+                # Filter to new filings only (not already processed)
+                new_filings = [
+                    f for f in filings
+                    if f.get('accession') not in existing_accessions
+                ]
+
+                if not new_filings:
+                    self.logger.debug(f"{sym}: all filings already processed")
+                    stats['skipped'] += 1
+                    continue
+
+                self.logger.debug(f"{sym}: {len(new_filings)} new filings to process")
+
+                # Extract MD&A text from new filings
+                filing_texts = collector.collect_filing_texts(
+                    cik=cik,
+                    filings=new_filings
+                )
+
+                if not filing_texts:
+                    self.logger.debug(f"{sym}: no MD&A text extracted")
+                    stats['skipped'] += 1
+                    continue
+
+                # Compute sentiment for each filing
+                new_sentiment_df = compute_sentiment_long(filing_texts, model)
+
+                if len(new_sentiment_df) == 0:
+                    self.logger.debug(f"{sym}: no sentiment computed")
+                    stats['skipped'] += 1
+                    continue
+
+                # Add CIK column and accession_number for deduplication
+                new_sentiment_df = new_sentiment_df.with_columns([
+                    pl.lit(cik).alias('cik')
+                ])
+
+                # Merge with existing data
+                if existing_df is not None and len(existing_df) > 0:
+                    combined_df = pl.concat([existing_df, new_sentiment_df])
+                else:
+                    combined_df = new_sentiment_df
+
+                # Sort by filing_date descending
+                combined_df = combined_df.sort('as_of_date', descending=True)
+
+                # Upload to S3
+                buffer = io.BytesIO()
+                combined_df.write_parquet(buffer)
+                buffer.seek(0)
+
+                self.s3_client.put_object(
+                    Bucket='us-equity-datalake',
+                    Key=s3_key,
+                    Body=buffer.getvalue(),
+                    Metadata={
+                        'cik': str(cik),
+                        'symbol': sym,
+                        'model_name': model.name,
+                        'model_version': model.version,
+                        'filings_count': str(len(combined_df.select('accession_number').unique())),
+                    }
+                )
+
+                stats['success'] += 1
+                self.logger.debug(
+                    f"{sym}: updated sentiment ({len(new_sentiment_df)} new metrics)"
+                )
+
+            except Exception as e:
+                self.logger.error(f"Error updating sentiment for {sym}: {e}")
+                stats['failed'] += 1
+
+        self.logger.info(
+            f"Sentiment update: {stats['success']} ok, "
+            f"{stats['failed']} fail, {stats['skipped']} skip"
+        )
+
+        return stats
+
     def update_top3000(self, target_date: dt.date) -> Dict[str, int]:
         """
         Refresh top 3000 universe for current month if missing.
@@ -902,6 +1061,7 @@ class DailyUpdateApp:
         update_fundamental: bool = True,
         update_ttm: bool = True,
         update_derived: bool = True,
+        update_sentiment: bool = True,
         fundamental_lookback_days: int = 7,
         update_top3000: bool = True,
     ):
@@ -920,6 +1080,7 @@ class DailyUpdateApp:
         :param update_fundamental: Whether to update raw fundamental data
         :param update_ttm: Whether to update TTM fundamental data
         :param update_derived: Whether to update derived metrics
+        :param update_sentiment: Whether to update sentiment data (FinBERT on MD&A)
         :param fundamental_lookback_days: Days to look back for EDGAR filings
         """
         # Default to yesterday if no date specified
@@ -974,8 +1135,9 @@ class DailyUpdateApp:
                     f"Market was closed on {target_date}, skipping ticks update"
                 )
 
-        # 2. Update fundamental data (check for recent filings)
-        if update_fundamental or update_ttm or update_derived:
+        # 2. Update fundamental/sentiment data (check for recent filings)
+        symbols_with_fundamental_filings = set()
+        if update_fundamental or update_ttm or update_derived or update_sentiment:
             self.logger.info("Checking EDGAR for recent filings...")
 
             symbols_with_fundamental_filings, symbols_with_filings, filing_stats = self.get_symbols_with_recent_filings(
@@ -984,44 +1146,57 @@ class DailyUpdateApp:
                 lookback_days=fundamental_lookback_days
             )
 
-            if symbols_with_fundamental_filings:
-                self.logger.info(
-                    f"Updating fundamental data for {len(symbols_with_fundamental_filings)} symbols "
-                    f"with 10-K/10-Q filings..."
-                )
+        if (update_fundamental or update_ttm or update_derived) and symbols_with_fundamental_filings:
+            self.logger.info(
+                f"Updating fundamental data for {len(symbols_with_fundamental_filings)} symbols "
+                f"with 10-K/10-Q filings..."
+            )
 
-                # Use a date range covering the lookback period
-                end_date = dt.date.today().isoformat()
-                start_date = (
-                    dt.date.today() - dt.timedelta(days=fundamental_lookback_days)
-                ).isoformat()
+            # Use a date range covering the lookback period
+            end_date = dt.date.today().isoformat()
+            start_date = (
+                dt.date.today() - dt.timedelta(days=fundamental_lookback_days)
+            ).isoformat()
 
-                # Log [EMAIL] markers for each enabled type
-                if update_fundamental:
-                    self.logger.info("[EMAIL] Update raw fundamental started")
-                if update_ttm:
-                    self.logger.info("[EMAIL] Update ttm fundamental started")
-                if update_derived:
-                    self.logger.info("[EMAIL] Update derived fundamental started")
+            # Log [EMAIL] markers for each enabled type
+            if update_fundamental:
+                self.logger.info("[EMAIL] Update raw fundamental started")
+            if update_ttm:
+                self.logger.info("[EMAIL] Update ttm fundamental started")
+            if update_derived:
+                self.logger.info("[EMAIL] Update derived fundamental started")
 
-                fundamental_stats = self.update_fundamental(
+            fundamental_stats = self.update_fundamental(
+                symbols=list(symbols_with_fundamental_filings),
+                start_date=start_date,
+                end_date=end_date,
+                update_raw=update_fundamental,
+                update_ttm=update_ttm,
+                update_derived=update_derived
+            )
+
+            # Log [EMAIL] success markers
+            if update_fundamental:
+                self.logger.info("[EMAIL] Update raw fundamental successful")
+            if update_ttm:
+                self.logger.info("[EMAIL] Update ttm fundamental successful")
+            if update_derived:
+                self.logger.info("[EMAIL] Update derived fundamental successful")
+        elif (update_fundamental or update_ttm or update_derived):
+            self.logger.info("No symbols with 10-K/10-Q filings, skipping fundamental update")
+
+        # 3. Update sentiment data (for symbols with new 10-K/10-Q filings)
+        if update_sentiment and symbols_with_fundamental_filings:
+            self.logger.info("[EMAIL] Update sentiment started")
+            try:
+                sentiment_stats = self.update_sentiment(
                     symbols=list(symbols_with_fundamental_filings),
-                    start_date=start_date,
-                    end_date=end_date,
-                    update_raw=update_fundamental,
-                    update_ttm=update_ttm,
-                    update_derived=update_derived
+                    end_date=target_date.isoformat()
                 )
-
-                # Log [EMAIL] success markers
-                if update_fundamental:
-                    self.logger.info("[EMAIL] Update raw fundamental successful")
-                if update_ttm:
-                    self.logger.info("[EMAIL] Update ttm fundamental successful")
-                if update_derived:
-                    self.logger.info("[EMAIL] Update derived fundamental successful")
-            else:
-                self.logger.info("No symbols with 10-K/10-Q filings, skipping fundamental update")
+                self.logger.info("[EMAIL] Update sentiment successful")
+            except Exception as e:
+                self.logger.error(f"Sentiment update failed: {e}")
+                self.logger.info("[EMAIL] Update sentiment failed")
 
         self.logger.info(f"=" * 80)
         self.logger.info(f"Daily update completed for {target_date}")

@@ -53,6 +53,11 @@ def main():
         help='Skip derived metrics update'
     )
     parser.add_argument(
+        '--no-sentiment',
+        action='store_true',
+        help='Skip sentiment analysis update (FinBERT on MD&A)'
+    )
+    parser.add_argument(
         '--lookback',
         type=int,
         default=7,
@@ -137,24 +142,26 @@ def main():
             target_date=target_date,
             update_daily_ticks=not skip_daily_ticks,
             update_minute_ticks=not skip_minute_ticks,
-            # During backfill: skip fundamental (run once at end)
+            # During backfill: skip fundamental/sentiment (run once at end)
             update_fundamental=not args.no_fundamental and not is_backfill,
             update_ttm=not args.no_ttm and not is_backfill,
             update_derived=not args.no_derived and not is_backfill,
+            update_sentiment=not args.no_sentiment and not is_backfill,
             fundamental_lookback_days=args.lookback,
             update_top3000=not args.no_top3000,
         )
 
-    # Backfill: run fundamental/TTM/derived ONCE at end with full date range
+    # Backfill: run fundamental/TTM/derived/sentiment ONCE at end with full date range
     if is_backfill:
         run_fundamental = not args.no_fundamental
         run_ttm = not args.no_ttm
         run_derived = not args.no_derived
+        run_sentiment = not args.no_sentiment
 
-        if run_fundamental or run_ttm or run_derived:
+        if run_fundamental or run_ttm or run_derived or run_sentiment:
             backfill_lookback = (end_date - start_date).days + 1
             print(f"\n{'='*60}")
-            print(f"Running fundamental updates (lookback={backfill_lookback} days)")
+            print(f"Running fundamental/sentiment updates (lookback={backfill_lookback} days)")
             print(f"{'='*60}")
 
             app.run_daily_update(
@@ -164,6 +171,7 @@ def main():
                 update_fundamental=run_fundamental,
                 update_ttm=run_ttm,
                 update_derived=run_derived,
+                update_sentiment=run_sentiment,
                 fundamental_lookback_days=backfill_lookback,
                 update_top3000=False,
             )

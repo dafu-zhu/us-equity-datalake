@@ -17,6 +17,7 @@ def main() -> None:
     parser.add_argument("--run-daily-ticks", action="store_true")
     parser.add_argument("--run-minute-ticks", action="store_true")
     parser.add_argument("--run-top-3000", action="store_true")
+    parser.add_argument("--run-sentiment", action="store_true", help="Run sentiment analysis (SEC MD&A extraction + FinBERT)")
     parser.add_argument("--run-all", action="store_true")
 
     parser.add_argument("--alpaca-start-year", type=int, default=2025)
@@ -57,6 +58,7 @@ def main() -> None:
             run_daily_ticks=args.run_daily_ticks,
             run_minute_ticks=args.run_minute_ticks,
             run_top_3000=args.run_top_3000,
+            run_sentiment=args.run_sentiment,
             run_all=args.run_all
         )
     finally:

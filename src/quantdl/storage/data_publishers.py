@@ -764,6 +764,85 @@ class DataPublishers:
             self.logger.error(f'Unexpected error publishing derived for {sym}: {e}', exc_info=True)
             return {'symbol': sym, 'status': 'failed', 'error': str(e)}
 
+    def publish_sentiment(
+        self,
+        sym: str,
+        start_date: str,
+        end_date: str,
+        sentiment_df: pl.DataFrame,
+        cik: Optional[str] = None
+    ) -> Dict[str, Optional[str]]:
+        """
+        Publish sentiment data for a single symbol to S3.
+
+        Storage: data/derived/features/sentiment/{cik}/sentiment.parquet
+        Long format with [cik, as_of_date, filing_type, fiscal_year, fiscal_quarter,
+                         metric, value, model_name, model_version].
+
+        :param sym: Symbol in Alpaca format (e.g., 'BRK.B')
+        :param start_date: Start date (YYYY-MM-DD)
+        :param end_date: End date (YYYY-MM-DD)
+        :param sentiment_df: Sentiment DataFrame (from compute_sentiment_for_cik)
+        :param cik: CIK string for path
+        :return: Dict with status info
+        """
+        try:
+            if len(sentiment_df) == 0:
+                self.logger.info(f'No sentiment data for {sym}')
+                return {
+                    'symbol': sym,
+                    'status': 'skipped',
+                    'error': f'Empty sentiment DataFrame for {sym}',
+                    'cik': cik
+                }
+
+            if cik is None:
+                self.logger.warning(f'Skipping {sym}: No CIK found')
+                return {
+                    'symbol': sym,
+                    'status': 'skipped',
+                    'error': f'No CIK found for {sym}',
+                    'cik': None
+                }
+
+            # Setup S3 message
+            buffer = io.BytesIO()
+            sentiment_df.write_parquet(buffer)
+            buffer.seek(0)
+
+            s3_key = f"data/derived/features/sentiment/{cik}/sentiment.parquet"
+
+            # Extract metadata
+            filing_count = sentiment_df.select(pl.col("as_of_date").n_unique()).item()
+            model_name = sentiment_df.select(pl.col("model_name").first()).item()
+            model_version = sentiment_df.select(pl.col("model_version").first()).item()
+
+            s3_metadata = {
+                'symbol': sym,
+                'cik': cik,
+                'data_type': 'sentiment',
+                'rows': str(len(sentiment_df)),
+                'filings': str(filing_count),
+                'model_name': str(model_name),
+                'model_version': str(model_version),
+                'start_date': start_date,
+                'end_date': end_date
+            }
+
+            s3_metadata_prepared = {
+                k: json.dumps(v) if isinstance(v, (list, dict)) else str(v)
+                for k, v in s3_metadata.items()
+            }
+
+            self.upload_fileobj(buffer, s3_key, s3_metadata_prepared)
+
+            return {'symbol': sym, 'status': 'success', 'error': None, 'cik': cik}
+
+        except Exception as e:
+            cik_str = f" (CIK {cik})" if cik else ""
+            self.logger.error(f'Unexpected error publishing sentiment for {sym}{cik_str}: {e}', exc_info=True)
+            return {'symbol': sym, 'status': 'failed', 'error': str(e), 'cik': cik}
+
     def publish_top_3000(
         self,
         year: int,

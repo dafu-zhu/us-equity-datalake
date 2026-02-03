@@ -144,8 +144,11 @@ class Validator:
         elif data_type == 'ttm':
             identifier = cik if cik else symbol
             s3_key = f'data/derived/features/fundamental/{identifier}/ttm.parquet'
+        elif data_type == 'sentiment':
+            identifier = cik if cik else symbol
+            s3_key = f'data/derived/features/sentiment/{identifier}/sentiment.parquet'
         else:
-            raise ValueError(f'Expected data_type is ticks, fundamental, or ttm, get {data_type} instead')
+            raise ValueError(f'Expected data_type is ticks, fundamental, ttm, or sentiment, get {data_type} instead')
         
         storage_backend = os.getenv('STORAGE_BACKEND', 's3').lower()
         local_path = os.getenv('LOCAL_STORAGE_PATH', '')
