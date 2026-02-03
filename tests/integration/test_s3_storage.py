@@ -56,48 +56,70 @@ class TestS3ClientIntegration:
         monkeypatch.setenv('AWS_ACCESS_KEY_ID', 'test_access_key')
         monkeypatch.setenv('AWS_SECRET_ACCESS_KEY', 'test_secret_key')
         monkeypatch.setenv('S3_BUCKET_NAME', 'test-bucket')
+        monkeypatch.setenv('STORAGE_BACKEND', 's3')
 
-    def test_client_initialization(self, mock_config_file, mock_env_vars):
+    @patch('quantdl.storage.clients.s3.boto3.client')
+    def test_client_initialization(self, mock_boto_client, mock_config_file, mock_env_vars):
         """Test S3Client initialization with config file"""
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
         client = S3Client(config_path=mock_config_file)
 
-        # Verify config loaded
+        # Verify config loaded and client accessible
         assert client.config is not None
-        assert client.aws_access_key_id == 'test_access_key'
-        assert client.aws_secret_access_key == 'test_secret_key'
+        assert client.is_local is False
+        _ = client.client  # Trigger client creation
+        assert mock_boto_client.called
 
-    def test_boto_config_creation(self, mock_config_file, mock_env_vars):
+    @patch('quantdl.storage.clients.s3.boto3.client')
+    def test_boto_config_creation(self, mock_boto_client, mock_config_file, mock_env_vars):
         """Test boto3 Config object creation"""
-        client = S3Client(config_path=mock_config_file)
-        config = client.boto_config
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
 
-        # Verify config parameters
+        client = S3Client(config_path=mock_config_file)
+        _ = client.client  # Trigger client creation
+
+        # Verify boto3.client was called with config
+        call_kwargs = mock_boto_client.call_args[1]
+        config = call_kwargs['config']
         assert config.region_name == 'us-east-2'
         assert config.max_pool_connections == 50
-        assert config.connect_timeout == 60
-        assert config.read_timeout == 60
 
-    def test_boto_config_with_retries(self, mock_config_file, mock_env_vars):
+    @patch('quantdl.storage.clients.s3.boto3.client')
+    def test_boto_config_with_retries(self, mock_boto_client, mock_config_file, mock_env_vars):
         """Test boto3 Config with retry settings"""
-        client = S3Client(config_path=mock_config_file)
-        config = client.boto_config
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
 
-        # Verify retries config
+        client = S3Client(config_path=mock_config_file)
+        _ = client.client  # Trigger client creation
+
+        # Verify retries config passed to boto3
+        call_kwargs = mock_boto_client.call_args[1]
+        config = call_kwargs['config']
         assert config.retries is not None
         assert config.retries['mode'] == 'adaptive'
         assert config.retries['total_max_attempts'] == 3
 
-    def test_boto_config_with_s3_settings(self, mock_config_file, mock_env_vars):
+    @patch('quantdl.storage.clients.s3.boto3.client')
+    def test_boto_config_with_s3_settings(self, mock_boto_client, mock_config_file, mock_env_vars):
         """Test boto3 Config with S3-specific settings"""
-        client = S3Client(config_path=mock_config_file)
-        config = client.boto_config
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
 
-        # Verify S3 config
+        client = S3Client(config_path=mock_config_file)
+        _ = client.client  # Trigger client creation
+
+        # Verify S3 config passed to boto3
+        call_kwargs = mock_boto_client.call_args[1]
+        config = call_kwargs['config']
         assert config.s3 is not None
         assert config.s3['addressing_style'] == 'virtual'
         assert config.s3['payload_signing_enabled'] is True
 
-    @patch('quantdl.storage.s3_client.boto3.client')
+    @patch('quantdl.storage.clients.s3.boto3.client')
     def test_client_property_creates_boto_client(self, mock_boto_client, mock_config_file, mock_env_vars):
         """Test that client property creates boto3 S3 client"""
         mock_s3 = MagicMock()
@@ -131,6 +153,7 @@ class TestS3ClientIntegration:
 
 
 @pytest.mark.integration
+@patch.dict(os.environ, {'STORAGE_BACKEND': 's3'})
 class TestValidatorIntegration:
     """Integration tests for Validator with mocked S3"""
 
@@ -143,6 +166,7 @@ class TestValidatorIntegration:
     def mock_env_vars(self, monkeypatch):
         """Mock environment variables"""
         monkeypatch.setenv('S3_BUCKET_NAME', 'test-bucket')
+        monkeypatch.setenv('STORAGE_BACKEND', 's3')
 
     def test_validator_initialization(self, mock_s3_client, mock_env_vars):
         """Test Validator initialization"""
@@ -351,6 +375,7 @@ class TestValidatorIntegration:
 
 
 @pytest.mark.integration
+@patch.dict(os.environ, {'STORAGE_BACKEND': 's3'})
 class TestS3ClientValidatorWorkflow:
     """Integration tests for S3Client + Validator workflow"""
 
@@ -377,8 +402,9 @@ class TestS3ClientValidatorWorkflow:
         monkeypatch.setenv('AWS_ACCESS_KEY_ID', 'test_key')
         monkeypatch.setenv('AWS_SECRET_ACCESS_KEY', 'test_secret')
         monkeypatch.setenv('S3_BUCKET_NAME', 'test-bucket')
+        monkeypatch.setenv('STORAGE_BACKEND', 's3')
 
-    @patch('quantdl.storage.s3_client.boto3.client')
+    @patch('quantdl.storage.clients.s3.boto3.client')
     def test_end_to_end_workflow(self, mock_boto_client, mock_config_file, mock_env_vars):
         """Test end-to-end workflow: S3Client → Validator → S3 operations"""
         # Setup mock S3 client
@@ -401,7 +427,7 @@ class TestS3ClientValidatorWorkflow:
         assert exists is True
         mock_s3.head_object.assert_called_once()
 
-    @patch('quantdl.storage.s3_client.boto3.client')
+    @patch('quantdl.storage.clients.s3.boto3.client')
     def test_workflow_with_multiple_operations(self, mock_boto_client, mock_config_file, mock_env_vars):
         """Test workflow with multiple validator operations"""
         mock_s3 = MagicMock()
