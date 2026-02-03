@@ -1655,8 +1655,9 @@ class UploadApp:
         model_time = time.time() - model_start
         self.logger.info(f"Model loaded in {model_time:.1f}s")
 
-        # Step 4: Process symbols sequentially (GPU inference is bottleneck)
+        # Step 4: Process symbols with parallel SEC fetches + sequential GPU inference
         self.logger.info(f"Step 4/4: Processing {len(symbols_with_cik)} symbols...")
+        self.logger.info("Strategy: Parallel SEC fetches (10 req/sec) + Sequential FinBERT (GPU)")
 
         # Initialize sentiment collector with rate limiter (10 req/sec)
         rate_limiter = RateLimiter(max_rate=10.0)
@@ -1668,53 +1669,122 @@ class UploadApp:
         success = 0
         failed = 0
         skipped = 0
+        skipped_exists = 0
 
         fetch_start = time.time()
 
+        # Filter out already-processed symbols first (fast S3 HEAD checks)
+        self.logger.info("Checking for existing sentiment files...")
+        symbols_to_process = []
+        for sym in tqdm(symbols_with_cik, desc="Check existing", unit="sym"):
+            cik = cik_map.get(sym)
+            if not cik:
+                skipped += 1
+                continue
+            key = f"data/derived/features/sentiment/{cik}/sentiment.parquet"
+            if not overwrite:
+                try:
+                    self.client.head_object(Bucket=self.config.bucket, Key=key)
+                    skipped_exists += 1
+                    continue
+                except:
+                    pass
+            symbols_to_process.append((sym, cik))
+
+        self.logger.info(
+            f"Symbols to process: {len(symbols_to_process)} "
+            f"(skipped {skipped_exists} existing, {skipped} no CIK)"
+        )
+
+        if not symbols_to_process:
+            self.logger.info("No symbols to process")
+            model.unload()
+            return
+
+        # Producer-consumer pattern: parallel SEC fetches, sequential GPU inference
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from queue import Queue
+        import threading
+
+        # Queue for prefetched filing texts (sym, cik, filing_texts)
+        prefetch_queue = Queue(maxsize=20)  # Buffer up to 20 symbols
+        fetch_done = threading.Event()
+
+        def fetch_worker(sym: str, cik: str) -> tuple:
+            """Fetch filing texts for a symbol (runs in thread pool)."""
+            try:
+                # Get filing metadata
+                filings = collector.get_filings_metadata(
+                    cik=cik,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+                if not filings:
+                    return (sym, cik, None, 'no_filings')
+
+                # Extract MD&A texts (this is the slow SEC fetch)
+                filing_texts = collector.collect_filing_texts(
+                    cik=cik,
+                    filings=filings
+                )
+                if not filing_texts:
+                    return (sym, cik, None, 'no_mda')
+
+                return (sym, cik, filing_texts, 'ok')
+
+            except Exception as e:
+                return (sym, cik, None, f'error: {e}')
+
+        def producer_thread():
+            """Producer: fetch SEC filings in parallel."""
+            # Use 5 workers to stay within rate limit (10 req/sec, ~2 req/worker/sec)
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {
+                    executor.submit(fetch_worker, sym, cik): (sym, cik)
+                    for sym, cik in symbols_to_process
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+                    prefetch_queue.put(result)
+            fetch_done.set()
+
+        # Start producer thread
+        producer = threading.Thread(target=producer_thread, daemon=True)
+        producer.start()
+
+        # Consumer: process prefetched texts with FinBERT (sequential GPU)
         try:
-            pbar = tqdm(symbols_with_cik, desc="Sentiment", unit="sym")
-            for sym in pbar:
-                cik = cik_map.get(sym)
-                if not cik:
-                    skipped += 1
+            pbar = tqdm(total=len(symbols_to_process), desc="Sentiment", unit="sym")
+            processed = 0
+
+            while True:
+                # Check if done
+                if fetch_done.is_set() and prefetch_queue.empty():
+                    break
+
+                # Get next prefetched result (with timeout to check done flag)
+                try:
+                    from queue import Empty
+                    result = prefetch_queue.get(timeout=1.0)
+                except Empty:
                     continue
 
-                # Check if exists
-                key = f"data/derived/features/sentiment/{cik}/sentiment.parquet"
-                if not overwrite:
-                    try:
-                        self.client.head_object(Bucket=self.config.bucket, Key=key)
+                sym, cik, filing_texts, status = result
+                processed += 1
+                pbar.update(1)
+
+                if status != 'ok':
+                    if status == 'no_filings' or status == 'no_mda':
                         skipped += 1
-                        pbar.set_postfix(ok=success, fail=failed, skip=skipped)
-                        continue
-                    except:
-                        pass
+                    else:
+                        self.logger.debug(f"Failed to fetch {sym}: {status}")
+                        failed += 1
+                    pbar.set_postfix(ok=success, fail=failed, skip=skipped)
+                    continue
 
                 try:
-                    # Get filing metadata
-                    filings = collector.get_filings_metadata(
-                        cik=cik,
-                        start_date=start_date,
-                        end_date=end_date
-                    )
-
-                    if not filings:
-                        skipped += 1
-                        pbar.set_postfix(ok=success, fail=failed, skip=skipped)
-                        continue
-
-                    # Extract MD&A texts
-                    filing_texts = collector.collect_filing_texts(
-                        cik=cik,
-                        filings=filings
-                    )
-
-                    if not filing_texts:
-                        skipped += 1
-                        pbar.set_postfix(ok=success, fail=failed, skip=skipped)
-                        continue
-
-                    # Compute sentiment
+                    # Compute sentiment (sequential GPU inference)
+                    pbar.set_description(f"FinBERT [{sym}]")
                     sentiment_df = compute_sentiment_for_cik(
                         cik=cik,
                         filing_texts=filing_texts,
@@ -1729,6 +1799,7 @@ class UploadApp:
                         continue
 
                     # Upload to S3
+                    key = f"data/derived/features/sentiment/{cik}/sentiment.parquet"
                     buffer = io.BytesIO()
                     sentiment_df.write_parquet(buffer)
                     buffer.seek(0)
@@ -1740,12 +1811,15 @@ class UploadApp:
                     )
 
                     success += 1
+                    pbar.set_description("Sentiment")
                     pbar.set_postfix(ok=success, fail=failed, skip=skipped)
 
                 except Exception as e:
                     self.logger.debug(f"Failed to process {sym}: {e}")
                     failed += 1
                     pbar.set_postfix(ok=success, fail=failed, skip=skipped)
+
+            pbar.close()
 
         finally:
             # Unload model to free GPU memory
@@ -1754,12 +1828,12 @@ class UploadApp:
 
         total_time = time.time() - start_time
         fetch_time = time.time() - fetch_start
-        processed = len(symbols_with_cik)
+        processed = len(symbols_to_process)
         avg_rate = processed / fetch_time if fetch_time > 0 else 0
 
         self.logger.info(
             f"Sentiment upload for {start_date} to {end_date} completed in {total_time:.1f}s: "
-            f"{success} success, {failed} failed, {skipped} skipped out of {processed} total"
+            f"{success} success, {failed} failed, {skipped} skipped, {skipped_exists} already existed"
         )
         self.logger.info(
             f"Performance: CIK fetch={prefetch_time:.1f}s, Model load={model_time:.1f}s, "
