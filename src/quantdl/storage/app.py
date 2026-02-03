@@ -1631,26 +1631,6 @@ class UploadApp:
             run_minute_ticks = True
             run_top_3000 = True
 
-        if run_fundamental:
-            self.logger.info(
-                f"Uploading raw fundamental data for {start_date} to {end_date} "
-                "(filing-year, long format)"
-            )
-            self.upload_fundamental(start_date, end_date, max_workers, overwrite)
-
-        if run_derived_fundamental:
-            self.logger.info(
-                f"Uploading derived fundamental data for {start_date} to {end_date}"
-            )
-            self.upload_derived_fundamental(start_date, end_date, max_workers, 
-            overwrite)
-        
-        if run_ttm_fundamental:
-            self.logger.info(
-                f"Uploading TTM fundamental data for {start_date} to {end_date}"
-            )
-            self.upload_ttm_fundamental(start_date, end_date, max_workers, overwrite)
-        
         # Upload daily ticks (CRSP bulk for historical, year-by-year for current)
         if run_daily_ticks:
             alpaca_start = self.data_collectors.ticks_collector.alpaca_start_year
@@ -1702,6 +1682,26 @@ class UploadApp:
 
             if run_top_3000:
                 self.upload_top_3000_monthly(year, overwrite=overwrite)
+
+        # Upload fundamental data LAST (after all ticks are processed)
+        if run_fundamental:
+            self.logger.info(
+                f"Uploading raw fundamental data for {start_date} to {end_date} "
+                "(filing-year, long format)"
+            )
+            self.upload_fundamental(start_date, end_date, max_workers, overwrite)
+
+        if run_ttm_fundamental:
+            self.logger.info(
+                f"Uploading TTM fundamental data for {start_date} to {end_date}"
+            )
+            self.upload_ttm_fundamental(start_date, end_date, max_workers, overwrite)
+
+        if run_derived_fundamental:
+            self.logger.info(
+                f"Uploading derived fundamental data for {start_date} to {end_date}"
+            )
+            self.upload_derived_fundamental(start_date, end_date, max_workers, overwrite)
 
     def upload_top_3000_monthly(
         self,

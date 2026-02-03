@@ -64,6 +64,11 @@ def main():
         help='Use WRDS-free mode (Nasdaq universe + SEC CIK mapping). '
              'Suitable for CI/CD environments where WRDS has IP restrictions.'
     )
+    parser.add_argument(
+        '--no-top3000',
+        action='store_true',
+        help='Skip top 3000 universe refresh'
+    )
 
     args = parser.parse_args()
 
@@ -116,22 +121,49 @@ def main():
         dates_to_process.append(current_date)
         current_date += dt.timedelta(days=1)
 
-    if len(dates_to_process) > 1:
+    is_backfill = len(dates_to_process) > 1
+
+    if is_backfill:
         print(f"Backfilling {len(dates_to_process)} days from {start_date} to {end_date}")
 
-    # Run update for each date
+    # Run update for each date (ticks only during backfill)
     for target_date in dates_to_process:
-        if len(dates_to_process) > 1:
+        if is_backfill:
             print(f"\n{'='*60}")
-            print(f"Processing {target_date}")
+            print(f"Processing {target_date} (ticks only)")
             print(f"{'='*60}")
 
         app.run_daily_update(
             target_date=target_date,
             update_daily_ticks=not skip_daily_ticks,
             update_minute_ticks=not skip_minute_ticks,
-            update_fundamental=not args.no_fundamental,
-            update_ttm=not args.no_ttm,
-            update_derived=not args.no_derived,
-            fundamental_lookback_days=args.lookback
+            # During backfill: skip fundamental (run once at end)
+            update_fundamental=not args.no_fundamental and not is_backfill,
+            update_ttm=not args.no_ttm and not is_backfill,
+            update_derived=not args.no_derived and not is_backfill,
+            fundamental_lookback_days=args.lookback,
+            update_top3000=not args.no_top3000,
         )
+
+    # Backfill: run fundamental/TTM/derived ONCE at end with full date range
+    if is_backfill:
+        run_fundamental = not args.no_fundamental
+        run_ttm = not args.no_ttm
+        run_derived = not args.no_derived
+
+        if run_fundamental or run_ttm or run_derived:
+            backfill_lookback = (end_date - start_date).days + 1
+            print(f"\n{'='*60}")
+            print(f"Running fundamental updates (lookback={backfill_lookback} days)")
+            print(f"{'='*60}")
+
+            app.run_daily_update(
+                target_date=end_date,
+                update_daily_ticks=False,
+                update_minute_ticks=False,
+                update_fundamental=run_fundamental,
+                update_ttm=run_ttm,
+                update_derived=run_derived,
+                fundamental_lookback_days=backfill_lookback,
+                update_top3000=False,
+            )

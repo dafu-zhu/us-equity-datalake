@@ -124,7 +124,7 @@ class TestUpdateCLI:
     @patch('quantdl.update.app_no_wrds.DailyUpdateAppNoWRDS')
     @patch('sys.argv', ['cli.py', '--no-wrds', '--date', '2024-06-05', '--backfill-from', '2024-06-03'])
     def test_main_backfill_from(self, mock_app_class):
-        """Test --backfill-from processes multiple days"""
+        """Test --backfill-from processes multiple days, fundamental at end"""
         from quantdl.update.cli import main
 
         mock_app_instance = Mock()
@@ -132,13 +132,29 @@ class TestUpdateCLI:
 
         main()
 
-        # Should be called 3 times: June 3, 4, 5
-        assert mock_app_instance.run_daily_update.call_count == 3
+        # Should be called 4 times: June 3, 4, 5 (ticks) + June 5 (fundamental)
+        assert mock_app_instance.run_daily_update.call_count == 4
 
         # Check dates processed
         calls = mock_app_instance.run_daily_update.call_args_list
         dates = [call[1]['target_date'] for call in calls]
-        assert dates == [dt.date(2024, 6, 3), dt.date(2024, 6, 4), dt.date(2024, 6, 5)]
+        assert dates == [
+            dt.date(2024, 6, 3), dt.date(2024, 6, 4), dt.date(2024, 6, 5),  # ticks
+            dt.date(2024, 6, 5)  # fundamental at end
+        ]
+
+        # Verify ticks calls skip fundamental
+        for call in calls[:3]:
+            assert call[1]['update_fundamental'] is False
+            assert call[1]['update_ttm'] is False
+            assert call[1]['update_derived'] is False
+
+        # Verify final call is fundamental only with full lookback
+        final_call = calls[3][1]
+        assert final_call['update_daily_ticks'] is False
+        assert final_call['update_minute_ticks'] is False
+        assert final_call['update_fundamental'] is True
+        assert final_call['fundamental_lookback_days'] == 3  # 3 days backfill
 
     @patch.dict(os.environ, {}, clear=True)
     @patch('quantdl.update.app_no_wrds.DailyUpdateAppNoWRDS')
