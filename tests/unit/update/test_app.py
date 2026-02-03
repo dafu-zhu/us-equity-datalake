@@ -1512,6 +1512,7 @@ class TestRunDailyUpdate:
 
         # Mock all update methods
         with patch.object(app.security_master, 'update_from_sec', return_value={'extended': 10, 'added': 0, 'unchanged': 0}), \
+             patch.object(app, 'update_top3000', return_value={'status': 'skipped'}), \
              patch.object(app, 'check_market_open', return_value=True), \
              patch.object(app, 'update_daily_ticks', return_value={'success': 2, 'failed': 0, 'skipped': 0}), \
              patch.object(app, 'update_minute_ticks', return_value={'success': 2, 'failed': 0, 'skipped': 0}), \
@@ -1569,6 +1570,7 @@ class TestRunDailyUpdate:
 
         # Mock check_market_open to return False
         with patch.object(app.security_master, 'update_from_sec', return_value={'extended': 0, 'added': 0, 'unchanged': 0}), \
+             patch.object(app, 'update_top3000', return_value={'status': 'skipped'}), \
              patch.object(app, 'check_market_open', return_value=False), \
              patch.object(app, 'update_daily_ticks') as mock_daily, \
              patch.object(app, 'update_minute_ticks') as mock_minute, \
@@ -1622,6 +1624,7 @@ class TestRunDailyUpdate:
 
         # Mock methods
         with patch.object(app.security_master, 'update_from_sec', return_value={'extended': 0, 'added': 0, 'unchanged': 0}), \
+             patch.object(app, 'update_top3000', return_value={'status': 'skipped'}), \
              patch.object(app, 'check_market_open', return_value=True), \
              patch.object(app, 'update_daily_ticks', return_value={'success': 1, 'failed': 0, 'skipped': 0}), \
              patch.object(app, 'update_minute_ticks', return_value={'success': 1, 'failed': 0, 'skipped': 0}), \

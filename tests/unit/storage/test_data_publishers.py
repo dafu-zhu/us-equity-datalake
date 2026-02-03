@@ -2,6 +2,7 @@
 Unit tests for storage.data_publishers module
 Tests DataPublishers functionality with dependency injection
 """
+import os
 import pytest
 import time
 from types import SimpleNamespace
@@ -34,6 +35,7 @@ def _make_publisher():
     return publisher, s3_client, data_collectors
 
 
+@patch.dict(os.environ, {'STORAGE_BACKEND': 's3'})
 class TestDataPublishers:
     def test_initialization(self):
         publisher, s3_client, data_collectors = _make_publisher()

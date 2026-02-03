@@ -112,7 +112,7 @@ class CIKResolver:
                     )
                     return None
 
-                # Success! Convert to zero-padded string
+                # Success! Convert to zero-padded string (10 digits)
                 cik_str = str(int(cik_value)).zfill(10)
                 if try_date != date:
                     self.logger.debug(

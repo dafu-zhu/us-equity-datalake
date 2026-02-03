@@ -68,8 +68,42 @@ class DataPublishers:
         key: str,
         metadata: Optional[Dict[str, str]] = None
     ) -> None:
-        """Upload file object to S3 with proper configuration"""
+        """Upload file object to S3 or local storage with proper configuration."""
+        storage_backend = os.getenv('STORAGE_BACKEND', 's3').lower()
+        local_path = os.getenv('LOCAL_STORAGE_PATH', '')
 
+        if storage_backend == 'local':
+            self._upload_local(data, key, metadata, local_path)
+        else:
+            self._upload_s3(data, key, metadata)
+
+    def _upload_local(
+        self,
+        data: io.BytesIO,
+        key: str,
+        metadata: Optional[Dict[str, str]],
+        local_path: str
+    ) -> None:
+        """Write file to local storage with metadata."""
+        file_path = Path(local_path) / key
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write data file
+        data.seek(0)
+        file_path.write_bytes(data.read())
+
+        # Write metadata as hidden file
+        if metadata:
+            metadata_file = file_path.parent / f'.{file_path.name}.metadata.json'
+            metadata_file.write_text(json.dumps(metadata, indent=2))
+
+    def _upload_s3(
+        self,
+        data: io.BytesIO,
+        key: str,
+        metadata: Optional[Dict[str, str]]
+    ) -> None:
+        """Upload file object to S3 with proper configuration."""
         # Define transfer config
         cfg = cast(Dict[str, Any], self.upload_config.transfer or {})
         transfer_config = TransferConfig(

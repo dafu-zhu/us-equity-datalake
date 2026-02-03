@@ -678,6 +678,113 @@ class DailyUpdateAppNoWRDS:
 
         return stats
 
+    def update_top3000(self, target_date: dt.date) -> Dict[str, int]:
+        """
+        Refresh top 3000 universe for current month if missing.
+
+        Uses Alpaca data directly for liquidity ranking (no UniverseManager).
+        Storage (S3): data/symbols/{YYYY}/{MM}/top3000.txt
+        Storage (local): {LOCAL_STORAGE_PATH}/symbols/{YYYY}/{MM}/top3000.txt
+        """
+        year = target_date.year
+        month = target_date.month
+
+        storage_backend = os.getenv('STORAGE_BACKEND', 's3').lower()
+        local_path = os.getenv('LOCAL_STORAGE_PATH', '')
+
+        # Check if already exists
+        if storage_backend == 'local':
+            local_file = Path(local_path) / 'data' / 'symbols' / str(year) / f'{month:02d}' / 'top3000.txt'
+            if local_file.exists():
+                self.logger.info(f"Top 3000 for {year}-{month:02d} already exists locally, skipping")
+                return {'status': 'skipped'}
+        else:
+            from quantdl.storage.validation import Validator
+            validator = Validator(self.s3_client, self.logger)
+            if validator.top_3000_exists(year, month):
+                self.logger.info(f"Top 3000 for {year}-{month:02d} already exists, skipping")
+                return {'status': 'skipped'}
+
+        self.logger.info(f"Refreshing top 3000 for {year}-{month:02d}...")
+
+        # Get all symbols from Nasdaq
+        symbols = self._get_symbols()
+
+        # Fetch 60 days of daily data from Alpaca
+        end_date = target_date
+        start_date = end_date - dt.timedelta(days=60)
+        start_str = dt.datetime.combine(start_date, dt.time(0, 0), tzinfo=dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        end_str = dt.datetime.combine(end_date, dt.time(23, 59, 59), tzinfo=dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+        symbol_bars = self.alpaca_ticks.fetch_daily_range_bulk(
+            symbols=symbols,
+            start_str=start_str,
+            end_str=end_str,
+            sleep_time=0.2
+        )
+
+        # Calculate avg dollar volume
+        liquidity_data = []
+        for sym, bars in symbol_bars.items():
+            if not bars:
+                continue
+            parsed = self.alpaca_ticks.parse_ticks(bars)
+            if not parsed:
+                continue
+            closes = [t.close for t in parsed if t.close]
+            volumes = [t.volume for t in parsed if t.volume]
+            if closes and volumes:
+                avg_dv = sum(c * v for c, v in zip(closes, volumes)) / len(closes)
+                if avg_dv > 1000:
+                    liquidity_data.append({'symbol': sym, 'avg_dollar_vol': avg_dv})
+
+        # Sort and take top 3000
+        liquidity_data.sort(key=lambda x: x['avg_dollar_vol'], reverse=True)
+        top_3000 = [d['symbol'] for d in liquidity_data[:3000]]
+
+        if not top_3000:
+            self.logger.warning("No symbols returned for top 3000")
+            return {'status': 'failed', 'error': 'No symbols'}
+
+        as_of = target_date.isoformat()
+        source = 'alpaca'
+
+        # Store based on backend
+        if storage_backend == 'local':
+            import json
+            local_dir = Path(local_path) / 'data' / 'symbols' / str(year) / f'{month:02d}'
+            local_dir.mkdir(parents=True, exist_ok=True)
+
+            # Write symbols list
+            txt_file = local_dir / 'top3000.txt'
+            txt_file.write_text('\n'.join(top_3000))
+
+            # Write metadata (hidden file)
+            metadata = {
+                'year': year,
+                'month': month,
+                'as_of': as_of,
+                'source': source,
+                'count': len(top_3000),
+                'created_at': dt.datetime.now().isoformat()
+            }
+            json_file = local_dir / '.top3000.txt.metadata.json'
+            json_file.write_text(json.dumps(metadata, indent=2))
+
+            self.logger.info(f"Saved top 3000 locally: {txt_file}")
+            result = {'status': 'success', 'path': str(txt_file)}
+        else:
+            result = self.data_publishers.publish_top_3000(
+                year=year,
+                month=month,
+                as_of=as_of,
+                symbols=top_3000,
+                source=source
+            )
+            self.logger.info(f"Uploaded top 3000 for {year}-{month:02d} ({len(top_3000)} symbols)")
+
+        return result
+
     def run_daily_update(
         self,
         target_date: Optional[dt.date] = None,
@@ -686,7 +793,8 @@ class DailyUpdateAppNoWRDS:
         update_fundamental: bool = True,
         update_ttm: bool = True,
         update_derived: bool = True,
-        fundamental_lookback_days: int = 7
+        fundamental_lookback_days: int = 7,
+        update_top3000: bool = True,
     ):
         """Run complete daily update workflow (no WRDS required)."""
         if target_date is None:
@@ -708,6 +816,12 @@ class DailyUpdateAppNoWRDS:
             f"{sm_stats['rebranded']} rebranded, {sm_stats['added']} new IPOs, "
             f"{sm_stats['delisted']} delisted, {sm_stats['unchanged']} unchanged"
         )
+
+        # Update top 3000 universe if needed
+        if update_top3000:
+            self.logger.info("[EMAIL] Update top3000 started")
+            self.update_top3000(target_date)
+            self.logger.info("[EMAIL] Update top3000 successful")
 
         # Get current universe
         symbols = self._get_symbols()

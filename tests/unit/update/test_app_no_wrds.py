@@ -1162,10 +1162,11 @@ class TestDailyUpdateAppNoWRDSRunDailyUpdate:
 
         app = DailyUpdateAppNoWRDS()
 
-        app.security_master.update_from_sec = Mock(return_value={'extended': 0, 'added': 0, 'unchanged': 100})
+        app.security_master.update_no_wrds = Mock(return_value={'extended': 0, 'added': 0, 'rebranded': 0, 'delisted': 0, 'unchanged': 100})
         app._get_symbols = Mock(return_value=[])
         app.check_market_open = Mock(return_value=False)
         app.get_symbols_with_recent_filings = Mock(return_value=(set(), set(), {}))
+        app.update_top3000 = Mock(return_value={'status': 'skipped'})
 
         # Mock date and timedelta properly
         today = dt.date(2025, 1, 12)

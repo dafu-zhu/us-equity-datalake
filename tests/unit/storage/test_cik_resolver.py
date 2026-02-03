@@ -137,13 +137,13 @@ class TestCIKResolver:
         security_master = Mock()
         logger = Mock()
         resolver = CIKResolver(security_master=security_master, logger=logger)
-        resolver._cik_cache[("AAPL", 2024)] = "320193"
+        resolver._cik_cache[("AAPL", 2024)] = "0000320193"
 
         resolver.get_cik = Mock()
 
         result = resolver.batch_prefetch_ciks(["AAPL"], year=2024)
 
-        assert result == {"AAPL": "320193"}
+        assert result == {"AAPL": "0000320193"}
         resolver.get_cik.assert_not_called()
 
     def test_batch_prefetch_populates_cache(self):
@@ -152,12 +152,12 @@ class TestCIKResolver:
         logger = Mock()
         resolver = CIKResolver(security_master=security_master, logger=logger)
 
-        resolver.get_cik = Mock(side_effect=["320193", None])
+        resolver.get_cik = Mock(side_effect=["0000320193", None])
 
         result = resolver.batch_prefetch_ciks(["AAPL", "NOPE"], year=2024, batch_size=2)
 
-        assert result == {"AAPL": "320193", "NOPE": None}
-        assert resolver._cik_cache[("AAPL", 2024)] == "320193"
+        assert result == {"AAPL": "0000320193", "NOPE": None}
+        assert resolver._cik_cache[("AAPL", 2024)] == "0000320193"
         assert resolver._cik_cache[("NOPE", 2024)] is None
 
     def test_get_cik_continues_when_security_id_none(self):
@@ -209,7 +209,7 @@ class TestCIKResolver:
 
         # Create 150 symbols
         symbols = [f"SYM{i:03d}" for i in range(150)]
-        resolver.get_cik = Mock(return_value="123456")
+        resolver.get_cik = Mock(return_value="0000123456")
 
         resolver.batch_prefetch_ciks(symbols, year=2024, batch_size=150)
 
@@ -235,7 +235,7 @@ class TestCIKResolver:
         def get_cik_side_effect(symbol, date, year):
             if symbol.startswith("NOPE"):
                 return None
-            return "123456"
+            return "0000123456"
 
         resolver.get_cik = Mock(side_effect=get_cik_side_effect)
 
@@ -270,8 +270,8 @@ class TestCIKResolver:
         resolver = CIKResolver(security_master=security_master, logger=logger)
 
         # Add some entries to cache
-        resolver._cik_cache[("AAPL", 2024)] = "320193"
-        resolver._cik_cache[("MSFT", 2024)] = "789019"
+        resolver._cik_cache[("AAPL", 2024)] = "0000320193"
+        resolver._cik_cache[("MSFT", 2024)] = "0000789019"
 
         resolver.clear_cache()
 
@@ -285,8 +285,8 @@ class TestCIKResolver:
         resolver = CIKResolver(security_master=security_master, logger=logger)
 
         # Add mixed entries
-        resolver._cik_cache[("AAPL", 2024)] = "320193"
-        resolver._cik_cache[("MSFT", 2024)] = "789019"
+        resolver._cik_cache[("AAPL", 2024)] = "0000320193"
+        resolver._cik_cache[("MSFT", 2024)] = "0000789019"
         resolver._cik_cache[("NOPE", 2024)] = None
 
         stats = resolver.get_cache_stats()

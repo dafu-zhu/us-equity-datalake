@@ -4,7 +4,6 @@ import logging
 import os
 from dotenv import load_dotenv
 from botocore.exceptions import ClientError
-from quantdl.storage.exceptions import NoSuchKeyError
 from quantdl.storage.s3_client import S3Client
 from typing import Optional
 from quantdl.utils.logger import setup_logger
@@ -27,11 +26,33 @@ class Validator:
 
     def list_files_under_prefix(self, prefix: str) -> list[str]:
         """
-        List all files (object keys) under a given S3 prefix
+        List all files (object keys) under a given prefix.
 
-        :param prefix: S3 prefix/directory to list (e.g., 'data/raw/fundamental')
-        :return: List of full S3 object keys under the prefix
+        :param prefix: Prefix/directory to list (e.g., 'data/raw/fundamental')
+        :return: List of full object keys under the prefix
         """
+        storage_backend = os.getenv('STORAGE_BACKEND', 's3').lower()
+        local_path = os.getenv('LOCAL_STORAGE_PATH', '')
+
+        if storage_backend == 'local':
+            return self._list_local_files(prefix, local_path)
+        else:
+            return self._list_s3_files(prefix)
+
+    def _list_local_files(self, prefix: str, local_path: str) -> list[str]:
+        """List all files under a local directory prefix."""
+        files = []
+        local_dir = Path(local_path) / prefix
+        if local_dir.exists():
+            for file_path in local_dir.rglob('*'):
+                if file_path.is_file() and not file_path.name.startswith('.'):
+                    # Convert to relative path (like S3 key)
+                    rel_path = file_path.relative_to(Path(local_path))
+                    files.append(str(rel_path).replace('\\', '/'))
+        return files
+
+    def _list_s3_files(self, prefix: str) -> list[str]:
+        """List all files under an S3 prefix."""
         files = []
         continuation_token = None
 
@@ -126,18 +147,25 @@ class Validator:
         else:
             raise ValueError(f'Expected data_type is ticks, fundamental, or ttm, get {data_type} instead')
         
-        try:
-            self.s3_client.head_object(
-                Bucket = self.bucket_name,
-                Key = s3_key
-            )
-            return True
-        except (ClientError, NoSuchKeyError) as error:
-            if error.response.get('Error', {}).get('Code') in ('404', 'NoSuchKey'):
-                return False
-            else:
-                self.logger.error(f'Error checking {s3_key}: {error}')
-                return False
+        storage_backend = os.getenv('STORAGE_BACKEND', 's3').lower()
+        local_path = os.getenv('LOCAL_STORAGE_PATH', '')
+
+        if storage_backend == 'local':
+            local_file = Path(local_path) / s3_key
+            return local_file.exists()
+        else:
+            try:
+                self.s3_client.head_object(
+                    Bucket=self.bucket_name,
+                    Key=s3_key
+                )
+                return True
+            except ClientError as error:
+                if error.response.get('Error', {}).get('Code') == '404':
+                    return False
+                else:
+                    self.logger.error(f'Error checking {s3_key}: {error}')
+                    return False
     
     def get_existing_minute_days(
             self,
@@ -147,7 +175,7 @@ class Validator:
             data_tier: str = "raw"
         ) -> set[str]:
         """
-        List all existing minute tick days for a symbol/month with single S3 call.
+        List all existing minute tick days for a symbol/month.
         Returns set of day strings (DD format) that exist.
 
         :param security_id: Security ID for ticks data
@@ -156,33 +184,49 @@ class Validator:
         :param data_tier: "raw" or "derived" (default: "raw")
         :return: Set of existing day strings (e.g., {'01', '02', '15'})
         """
+        storage_backend = os.getenv('STORAGE_BACKEND', 's3').lower()
+        local_path = os.getenv('LOCAL_STORAGE_PATH', '')
         prefix = f"data/{data_tier}/ticks/minute/{security_id}/{year}/{month:02d}/"
         existing_days = set()
 
-        try:
-            response = self.s3_client.list_objects_v2(
-                Bucket=self.bucket_name,
-                Prefix=prefix,
-                Delimiter='/'
-            )
-            # CommonPrefixes contains subdirectories (day folders)
-            for prefix_info in response.get('CommonPrefixes', []):
-                # prefix_info['Prefix'] = 'data/raw/ticks/minute/12345/2024/01/15/'
-                day = prefix_info['Prefix'].rstrip('/').split('/')[-1]
-                existing_days.add(day)
-        except Exception as e:
-            self.logger.error(f'Error listing {prefix}: {e}')
+        if storage_backend == 'local':
+            local_dir = Path(local_path) / prefix
+            if local_dir.exists():
+                for day_dir in local_dir.iterdir():
+                    if day_dir.is_dir():
+                        existing_days.add(day_dir.name)
+        else:
+            try:
+                response = self.s3_client.list_objects_v2(
+                    Bucket=self.bucket_name,
+                    Prefix=prefix,
+                    Delimiter='/'
+                )
+                # CommonPrefixes contains subdirectories (day folders)
+                for prefix_info in response.get('CommonPrefixes', []):
+                    # prefix_info['Prefix'] = 'data/raw/ticks/minute/12345/2024/01/15/'
+                    day = prefix_info['Prefix'].rstrip('/').split('/')[-1]
+                    existing_days.add(day)
+            except Exception as e:
+                self.logger.error(f'Error listing {prefix}: {e}')
 
         return existing_days
 
     def top_3000_exists(self, year: int, month: int) -> bool:
-        s3_key = f"data/symbols/{year}/{month:02d}/top3000.txt"
-        try:
-            self.s3_client.head_object(Bucket="us-equity-datalake", Key=s3_key)
-            return True
-        except (ClientError, NoSuchKeyError) as error:
-            if error.response.get('Error', {}).get('Code') in ('404', 'NoSuchKey'):
+        storage_backend = os.getenv('STORAGE_BACKEND', 's3').lower()
+        local_path = os.getenv('LOCAL_STORAGE_PATH', '')
+        key = f"data/symbols/{year}/{month:02d}/top3000.txt"
+
+        if storage_backend == 'local':
+            local_file = Path(local_path) / key
+            return local_file.exists()
+        else:
+            try:
+                self.s3_client.head_object(Bucket=self.bucket_name, Key=key)
+                return True
+            except ClientError as error:
+                if error.response.get('Error', {}).get('Code') == '404':
+                    return False
+                self.logger.error(f"Error checking {key}: {error}")
                 return False
-            self.logger.error(f"Error checking {s3_key}: {error}")
-            return False
         

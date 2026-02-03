@@ -2,11 +2,13 @@
 Unit tests for storage.validation.Validator class
 Tests data validation and existence checking
 """
+import os
 import pytest
 from unittest.mock import Mock, patch
 from botocore.exceptions import ClientError
 
 
+@patch.dict(os.environ, {'STORAGE_BACKEND': 's3'})
 class TestValidator:
     """Test Validator class"""
 
