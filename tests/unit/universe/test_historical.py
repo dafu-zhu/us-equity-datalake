@@ -111,16 +111,12 @@ class TestGetHistUniverseCRSP:
         mock_conn.close.assert_called_once()
 
     @patch('quantdl.universe.historical.validate_year')
-    @patch('quantdl.universe.historical.validate_month')
-    @patch('quantdl.universe.historical.validate_date_string')
-    def test_date_validation(self, mock_validate_date, mock_validate_month, mock_validate_year):
-        """Test that date validation functions are called"""
+    def test_date_validation(self, mock_validate_year):
+        """Test that year validation function is called"""
         mock_conn = Mock()
 
         # Setup validation mocks
         mock_validate_year.return_value = 2024
-        mock_validate_month.return_value = 12
-        mock_validate_date.return_value = '2024-12-28'
 
         # Mock SQL result
         mock_df = pd.DataFrame({
@@ -135,10 +131,8 @@ class TestGetHistUniverseCRSP:
 
         get_hist_universe_crsp(year=2024, month=12, db=mock_conn)
 
-        # Verify validation functions were called
+        # Verify year validation was called (month validation removed for survivorship-bias-free queries)
         mock_validate_year.assert_called_once_with(2024)
-        mock_validate_month.assert_called_once_with(12)
-        mock_validate_date.assert_called_once_with('2024-12-28')
 
     @patch('quantdl.universe.historical.validate_year')
     @patch('quantdl.universe.historical.validate_month')
@@ -158,15 +152,11 @@ class TestGetHistUniverseCRSP:
         mock_conn.close.assert_not_called()
 
     @patch('quantdl.universe.historical.validate_year')
-    @patch('quantdl.universe.historical.validate_month')
-    @patch('quantdl.universe.historical.validate_date_string')
-    def test_sql_query_format(self, mock_validate_date, mock_validate_month, mock_validate_year):
-        """Test that SQL query is formatted correctly"""
+    def test_sql_query_format(self, mock_validate_year):
+        """Test that SQL query uses full year range for survivorship-bias-free results"""
         mock_conn = Mock()
 
         mock_validate_year.return_value = 2024
-        mock_validate_month.return_value = 6
-        mock_validate_date.return_value = '2024-06-28'
 
         mock_df = pd.DataFrame({
             'ticker': ['AAPL'],
@@ -180,9 +170,10 @@ class TestGetHistUniverseCRSP:
 
         get_hist_universe_crsp(year=2024, month=6, db=mock_conn)
 
-        # Verify SQL query includes validated date
+        # Verify SQL query uses full year range (not point-in-time) to avoid survivorship bias
         call_args = mock_conn.raw_sql.call_args[0][0]
-        assert '2024-06-28' in call_args
+        assert '2024-01-01' in call_args  # Year start
+        assert '2024-12-31' in call_args  # Year end
         assert 'shrcd IN (10, 11)' in call_args
         assert 'exchcd IN (1, 2, 3)' in call_args
 

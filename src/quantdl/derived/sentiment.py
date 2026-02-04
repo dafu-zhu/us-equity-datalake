@@ -172,44 +172,27 @@ def compute_fog_index(text: str) -> float:
     return round(fog, 2)
 
 
-def compute_filing_sentiment(
+def _aggregate_sentiment_results(
     filing_text: FilingText,
-    model: SentimentModel,
-    chunk_size: int = 1500,
-    logger: Optional[logging.Logger] = None
+    results: List[SentimentResult],
+    model_name: str,
+    model_version: str
 ) -> Optional[FilingSentiment]:
     """
-    Compute sentiment metrics for a single filing.
+    Aggregate sentiment results for a single filing.
+
+    Internal helper that computes metrics from pre-computed model results.
 
     :param filing_text: FilingText with extracted MD&A
-    :param model: Loaded sentiment model
-    :param chunk_size: Characters per chunk for inference
-    :param logger: Optional logger
-    :return: FilingSentiment with aggregated metrics or None on error
+    :param results: Pre-computed SentimentResult list for this filing's chunks
+    :param model_name: Name of the model used
+    :param model_version: Version of the model used
+    :return: FilingSentiment with aggregated metrics or None if no results
     """
-    if not filing_text.text:
+    if not results:
         return None
 
     text = filing_text.text
-
-    # Chunk the text
-    chunks = chunk_text(text, chunk_size=chunk_size)
-    if not chunks:
-        return None
-
-    # Run inference
-    try:
-        results = model.predict(chunks)
-    except Exception as e:
-        if logger:
-            logger.warning(
-                f"Inference failed for {filing_text.cik} "
-                f"{filing_text.filing_date}: {e}"
-            )
-        return None
-
-    if not results:
-        return None
 
     # Aggregate results
     positive_scores = []
@@ -311,6 +294,48 @@ def compute_filing_sentiment(
         avg_sentence_length=avg_sentence_length,
         fog_index=fog_index,
         # Model info
+        model_name=model_name,
+        model_version=model_version
+    )
+
+
+def compute_filing_sentiment(
+    filing_text: FilingText,
+    model: SentimentModel,
+    chunk_size: int = 1500,
+    logger: Optional[logging.Logger] = None
+) -> Optional[FilingSentiment]:
+    """
+    Compute sentiment metrics for a single filing.
+
+    :param filing_text: FilingText with extracted MD&A
+    :param model: Loaded sentiment model
+    :param chunk_size: Characters per chunk for inference
+    :param logger: Optional logger
+    :return: FilingSentiment with aggregated metrics or None on error
+    """
+    if not filing_text.text:
+        return None
+
+    # Chunk the text
+    chunks = chunk_text(filing_text.text, chunk_size=chunk_size)
+    if not chunks:
+        return None
+
+    # Run inference
+    try:
+        results = model.predict(chunks)
+    except Exception as e:
+        if logger:
+            logger.warning(
+                f"Inference failed for {filing_text.cik} "
+                f"{filing_text.filing_date}: {e}"
+            )
+        return None
+
+    return _aggregate_sentiment_results(
+        filing_text=filing_text,
+        results=results,
         model_name=model.name,
         model_version=model.version
     )
@@ -404,18 +429,20 @@ def compute_sentiment_for_cik(
     filing_texts: List[FilingText],
     model: SentimentModel,
     symbol: Optional[str] = None,
+    chunk_size: int = 1500,
     logger: Optional[logging.Logger] = None
 ) -> pl.DataFrame:
     """
     Compute sentiment for all filings for a CIK.
 
-    Convenience function that chains compute_filing_sentiment and
-    compute_sentiment_long.
+    Batches all chunks from all filings into a single model.predict() call
+    for efficient GPU utilization, then maps results back to filings.
 
     :param cik: Company CIK
     :param filing_texts: List of extracted filing texts
     :param model: Loaded sentiment model
     :param symbol: Optional symbol for logging
+    :param chunk_size: Characters per chunk for inference
     :param logger: Optional logger
     :return: Long-format DataFrame with all sentiment metrics
     """
@@ -426,13 +453,62 @@ def compute_sentiment_for_cik(
             logger.debug(f"{log_prefix}No filing texts provided")
         return pl.DataFrame()
 
-    # Compute sentiment for each filing
+    # Step 1: Collect all chunks from all filings with indices
+    all_chunks: List[str] = []
+    chunk_filing_indices: List[int] = []  # Maps chunk index -> filing index
+    filing_chunk_counts: List[int] = []  # Number of chunks per filing
+
+    for filing_idx, filing_text in enumerate(filing_texts):
+        if not filing_text.text:
+            filing_chunk_counts.append(0)
+            continue
+
+        chunks = chunk_text(filing_text.text, chunk_size=chunk_size)
+        filing_chunk_counts.append(len(chunks))
+
+        for chunk in chunks:
+            all_chunks.append(chunk)
+            chunk_filing_indices.append(filing_idx)
+
+    if not all_chunks:
+        if logger:
+            logger.debug(f"{log_prefix}No text chunks to process")
+        return pl.DataFrame()
+
+    # Step 2: Run single batched inference on all chunks
+    try:
+        all_results = model.predict(all_chunks)
+    except Exception as e:
+        if logger:
+            logger.warning(f"{log_prefix}Inference failed: {e}")
+        return pl.DataFrame()
+
+    if not all_results:
+        if logger:
+            logger.debug(f"{log_prefix}No results from model")
+        return pl.DataFrame()
+
+    # Step 3: Map results back to filings
+    # Group results by filing index
+    filing_results: Dict[int, List[SentimentResult]] = {}
+    for chunk_idx, result in enumerate(all_results):
+        filing_idx = chunk_filing_indices[chunk_idx]
+        if filing_idx not in filing_results:
+            filing_results[filing_idx] = []
+        filing_results[filing_idx].append(result)
+
+    # Step 4: Aggregate sentiment for each filing
     sentiments = []
-    for filing_text in filing_texts:
-        sentiment = compute_filing_sentiment(
+    for filing_idx, filing_text in enumerate(filing_texts):
+        results = filing_results.get(filing_idx, [])
+        if not results:
+            continue
+
+        sentiment = _aggregate_sentiment_results(
             filing_text=filing_text,
-            model=model,
-            logger=logger
+            results=results,
+            model_name=model.name,
+            model_version=model.version
         )
         if sentiment:
             sentiments.append(sentiment)
@@ -445,7 +521,8 @@ def compute_sentiment_for_cik(
     if logger:
         logger.debug(
             f"{log_prefix}Computed sentiment for "
-            f"{len(sentiments)}/{len(filing_texts)} filings"
+            f"{len(sentiments)}/{len(filing_texts)} filings "
+            f"({len(all_chunks)} chunks total)"
         )
 
     # Convert to long format

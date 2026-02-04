@@ -11,15 +11,16 @@ from quantdl.utils.validation import validate_date_string, validate_year, valida
 
 load_dotenv()
 
-def get_hist_universe_crsp(year: int, month: int, db: Optional[wrds.Connection] = None) -> pl.DataFrame:
+def get_hist_universe_crsp(year: int, month: int = 12, db: Optional[wrds.Connection] = None) -> pl.DataFrame:
     """
     Historical universe common stock list from CRSP database for a given year.
-    Queries CRSP directly using year-end "as of" date to get all active stocks.
+    Returns ALL stocks that were active at ANY POINT during the year to avoid
+    survivorship bias (includes mid-year IPOs and delistings).
 
     Ticker name has no '-' or '.', e.g. BRK.B in alpaca, BRK-B in SEC, BRKB in CRSP
 
     :param year: Year (e.g., 2024)
-    :param month: Month (e.g., 12)
+    :param month: Month (deprecated, kept for backward compatibility - now uses full year range)
     :param db: Optional WRDS connection (creates new one if not provided)
     :return: DataFrame with columns: Ticker (CRSP format), Name, PERMNO
     """
@@ -38,20 +39,23 @@ def get_hist_universe_crsp(year: int, month: int, db: Optional[wrds.Connection] 
         close_db = True
 
     try:
-        # Use end-of-month as "as of" date
-        # Validate year and month to ensure they are integers within valid ranges
+        # Validate year
         validated_year = validate_year(year)
-        validated_month = validate_month(month)
 
-        asof = f"{validated_year}-{validated_month:02d}-28"
-        validated_asof = validate_date_string(asof)
+        # Use full year range to capture ALL stocks active at any point during the year
+        # This eliminates survivorship bias by including:
+        # - Stocks that IPO'd mid-year (namedt during year)
+        # - Stocks that delisted mid-year (nameendt during year)
+        # - Stocks active all year
+        year_start = f"{validated_year}-01-01"
+        year_end = f"{validated_year}-12-31"
 
         sql = f"""
         SELECT DISTINCT
             ticker, tsymbol, permno, comnam, shrcd, exchcd
         FROM crsp_a_stock.dsenames
-        WHERE namedt <= '{validated_asof}'
-          AND nameendt >= '{validated_asof}'
+        WHERE namedt <= '{year_end}'
+          AND nameendt >= '{year_start}'
           AND ticker IS NOT NULL
           AND shrcd IN (10, 11)
           AND exchcd IN (1, 2, 3)
