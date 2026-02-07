@@ -2,11 +2,13 @@
 Sentiment upload handler.
 
 Handles parallel SEC fetches + sequential GPU inference for sentiment analysis.
+Uses S3 caching for MD&A texts to avoid re-fetching from SEC.
 """
 
 from __future__ import annotations
 
 import io
+import json
 import time
 import logging
 import threading
@@ -21,6 +23,129 @@ from quantdl.storage.utils import RateLimiter
 if TYPE_CHECKING:
     from quantdl.storage.utils import CIKResolver
     from quantdl.universe.manager import UniverseManager
+
+
+class SentimentCheckpoint:
+    """
+    Checkpoint tracker for sentiment processing.
+
+    Tracks which CIKs have been fully processed to allow resume.
+    Path: data/cache/sentiment_checkpoint.json
+    """
+
+    def __init__(self, s3_client, bucket: str, logger: logging.Logger):
+        self.s3_client = s3_client
+        self.bucket = bucket
+        self.logger = logger
+        self._checkpoint_key = "data/cache/sentiment_checkpoint.json"
+        self._processed: set = set()
+        self._load()
+
+    def _load(self) -> None:
+        """Load checkpoint from S3."""
+        try:
+            response = self.s3_client.get_object(
+                Bucket=self.bucket,
+                Key=self._checkpoint_key
+            )
+            data = json.loads(response['Body'].read().decode('utf-8'))
+            self._processed = set(data.get('processed_ciks', []))
+            self.logger.info(f"Loaded checkpoint: {len(self._processed)} CIKs already processed")
+        except:
+            self._processed = set()
+            self.logger.info("No checkpoint found, starting fresh")
+
+    def _save(self) -> None:
+        """Save checkpoint to S3."""
+        data = {
+            'processed_ciks': list(self._processed),
+            'count': len(self._processed),
+            'last_updated': time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+        self.s3_client.put_object(
+            Bucket=self.bucket,
+            Key=self._checkpoint_key,
+            Body=json.dumps(data).encode('utf-8')
+        )
+
+    def is_processed(self, cik: str) -> bool:
+        """Check if CIK has been fully processed."""
+        return cik in self._processed
+
+    def mark_processed(self, cik: str) -> None:
+        """Mark CIK as fully processed and save checkpoint."""
+        self._processed.add(cik)
+        # Save every 10 CIKs to reduce S3 calls
+        if len(self._processed) % 10 == 0:
+            self._save()
+
+    def save(self) -> None:
+        """Force save checkpoint."""
+        self._save()
+
+    def count(self) -> int:
+        """Return number of processed CIKs."""
+        return len(self._processed)
+
+
+class MDACache:
+    """
+    S3 cache for extracted MD&A texts.
+
+    Stores MD&A texts in S3 to avoid re-fetching from SEC.
+    Path: data/cache/mda/{cik}/mda_cache.json
+    """
+
+    def __init__(self, s3_client, bucket: str, logger: logging.Logger):
+        self.s3_client = s3_client
+        self.bucket = bucket
+        self.logger = logger
+        self._local_cache: Dict[str, Dict] = {}  # cik -> filing_texts dict
+
+    def _cache_key(self, cik: str) -> str:
+        return f"data/cache/mda/{cik}/mda_cache.json"
+
+    def get(self, cik: str) -> Optional[Dict]:
+        """Get cached MD&A texts for a CIK."""
+        if cik in self._local_cache:
+            return self._local_cache[cik]
+
+        key = self._cache_key(cik)
+        try:
+            response = self.s3_client.get_object(Bucket=self.bucket, Key=key)
+            data = json.loads(response['Body'].read().decode('utf-8'))
+            self._local_cache[cik] = data
+            return data
+        except:
+            return None
+
+    def put(self, cik: str, filing_texts: List) -> None:
+        """Cache MD&A texts for a CIK."""
+        # Convert FilingText objects to dicts
+        data = {
+            'cik': cik,
+            'filings': [ft.to_dict() for ft in filing_texts]
+        }
+
+        key = self._cache_key(cik)
+        self.s3_client.put_object(
+            Bucket=self.bucket,
+            Key=key,
+            Body=json.dumps(data).encode('utf-8')
+        )
+        self._local_cache[cik] = data
+
+    def has(self, cik: str) -> bool:
+        """Check if CIK has cached data."""
+        if cik in self._local_cache:
+            return True
+
+        key = self._cache_key(cik)
+        try:
+            self.s3_client.head_object(Bucket=self.bucket, Key=key)
+            return True
+        except:
+            return False
 
 
 class SentimentHandler:
@@ -100,19 +225,33 @@ class SentimentHandler:
         fetch_start = time.time()
         rate_limiter = RateLimiter(max_rate=10.0)
         collector = SentimentCollector(rate_limiter=rate_limiter, logger=self.logger)
+        mda_cache = MDACache(self.s3_client, self.bucket, self.logger)
+        checkpoint = SentimentCheckpoint(self.s3_client, self.bucket, self.logger)
+
+        # Filter out already-checkpointed CIKs
+        symbols_after_checkpoint = [
+            (sym, cik) for sym, cik in symbols_to_process
+            if not checkpoint.is_processed(cik)
+        ]
+        skipped_checkpoint = len(symbols_to_process) - len(symbols_after_checkpoint)
+        if skipped_checkpoint > 0:
+            self.logger.info(f"Skipping {skipped_checkpoint} CIKs from checkpoint (already processed)")
 
         try:
             self._process_symbols(
-                symbols_to_process=symbols_to_process,
+                symbols_to_process=symbols_after_checkpoint,
                 collector=collector,
                 model=model,
                 compute_fn=compute_sentiment_for_cik,
                 start_date=start_date,
-                end_date=end_date
+                end_date=end_date,
+                mda_cache=mda_cache,
+                checkpoint=checkpoint
             )
         finally:
+            checkpoint.save()  # Final checkpoint save
             model.unload()
-            self.logger.info("Model unloaded")
+            self.logger.info("Model unloaded, checkpoint saved")
 
         fetch_time = time.time() - fetch_start
         return self._build_stats(start_time, model_time, fetch_time, len(symbols_to_process))
@@ -201,30 +340,85 @@ class SentimentHandler:
         model,
         compute_fn,
         start_date: str,
-        end_date: str
+        end_date: str,
+        mda_cache: Optional[MDACache] = None,
+        checkpoint: Optional[SentimentCheckpoint] = None
     ):
-        """Process symbols with parallel SEC fetches + sequential GPU inference."""
+        """Process symbols with parallel SEC fetches + batched GPU inference."""
+        from quantdl.derived.sentiment import chunk_text, _aggregate_sentiment_results
+        from quantdl.collection.sentiment import FilingText
+
         self.logger.info(f"Processing {len(symbols_to_process)} symbols...")
-        self.logger.info("Strategy: Parallel SEC fetches (10 req/sec) + Sequential FinBERT (GPU)")
+        self.logger.info("Strategy: S3 cache + Parallel SEC fetches (10 req/sec) + Batched FinBERT (GPU)")
+        self.logger.info("All filings will be processed (no limit). Progress is checkpointed.")
 
         # Queue for prefetched filing texts
-        prefetch_queue: Queue = Queue(maxsize=20)
+        prefetch_queue: Queue = Queue(maxsize=100)  # Larger queue for batching
         fetch_done = threading.Event()
 
+        # Track cache stats
+        cache_hits = 0
+        cache_misses = 0
+        cache_lock = threading.Lock()
+
         def fetch_worker(sym: str, cik: str) -> Tuple[str, str, Any, str]:
-            """Fetch filing texts for a symbol (runs in thread pool)."""
+            """Fetch filing texts for a symbol (cache first, then SEC)."""
+            nonlocal cache_hits, cache_misses
+            import time as _time
+
             try:
+                # Check S3 cache first
+                if mda_cache:
+                    cached = mda_cache.get(cik)
+                    if cached and cached.get('filings'):
+                        # Convert cached dicts back to FilingText objects
+                        filing_texts = [
+                            FilingText(
+                                cik=f['cik'],
+                                accession_number=f['accession_number'],
+                                filing_date=f['filing_date'],
+                                filing_type=f['filing_type'],
+                                section=f['section'],
+                                text=f['text'],
+                                fiscal_year=f.get('fiscal_year'),
+                                fiscal_quarter=f.get('fiscal_quarter')
+                            )
+                            for f in cached['filings']
+                        ]
+                        with cache_lock:
+                            cache_hits += 1
+                        return (sym, cik, filing_texts, 'ok')
+
+                # Cache miss - fetch from SEC
+                t0 = _time.time()
                 filings = collector.get_filings_metadata(
                     cik=cik,
                     start_date=start_date,
                     end_date=end_date
                 )
+                t1 = _time.time()
                 if not filings:
                     return (sym, cik, None, 'no_filings')
 
-                filing_texts = collector.collect_filing_texts(cik=cik, filings=filings)
+                # Process all filings (no limit)
+                filing_texts = collector.collect_filing_texts(
+                    cik=cik,
+                    filings=filings
+                )
+                t2 = _time.time()
+                self.logger.debug(f"{sym}: metadata={t1-t0:.1f}s, texts={t2-t1:.1f}s ({len(filings)} filings)")
                 if not filing_texts:
                     return (sym, cik, None, 'no_mda')
+
+                # Cache for future runs
+                if mda_cache:
+                    try:
+                        mda_cache.put(cik, filing_texts)
+                    except Exception as e:
+                        pass  # Don't fail on cache write errors
+
+                with cache_lock:
+                    cache_misses += 1
 
                 return (sym, cik, filing_texts, 'ok')
             except Exception as e:
@@ -232,7 +426,8 @@ class SentimentHandler:
 
         def producer_thread():
             """Producer: fetch SEC filings in parallel."""
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            # More workers since each fetch blocks on rate limiter
+            with ThreadPoolExecutor(max_workers=30) as executor:
                 futures = {
                     executor.submit(fetch_worker, sym, cik): (sym, cik)
                     for sym, cik in symbols_to_process
@@ -245,16 +440,98 @@ class SentimentHandler:
         producer = threading.Thread(target=producer_thread, daemon=True)
         producer.start()
 
-        # Consumer: process with FinBERT (sequential GPU)
-        pbar = tqdm(total=len(symbols_to_process), desc="Sentiment", unit="sym")
+        # Batching parameters
+        BATCH_CHUNK_TARGET = 512  # Target chunks per inference batch
 
+        # Batch accumulator: stores (sym, cik, filing_texts, chunk_indices)
+        batch_buffer: List[Tuple[str, str, List, List[Tuple[int, int]]]] = []
+        all_chunks: List[str] = []  # Flattened chunks for batch inference
+
+        pbar = tqdm(total=len(symbols_to_process), desc="FinBERT", unit="sym")
+        symbols_in_batch = 0
+
+        def process_batch():
+            """Run batched inference and upload results."""
+            nonlocal all_chunks, batch_buffer, symbols_in_batch
+
+            if not all_chunks:
+                return
+
+            pbar.set_description(f"FinBERT [batch {len(batch_buffer)} syms, {len(all_chunks)} chunks]")
+
+            # Run single batched inference
+            try:
+                all_results = model.predict(all_chunks)
+            except Exception as e:
+                self.logger.warning(f"Batch inference failed: {e}")
+                self.failed += len(batch_buffer)
+                all_chunks = []
+                batch_buffer = []
+                return
+
+            # Map results back to symbols
+            for sym, cik, filing_texts, chunk_map in batch_buffer:
+                try:
+                    # Extract results for this symbol's filings
+                    from quantdl.derived.sentiment import compute_sentiment_long, FilingSentiment
+
+                    sentiments = []
+                    for filing_idx, (start_idx, end_idx) in enumerate(chunk_map):
+                        filing_results = all_results[start_idx:end_idx]
+                        if not filing_results:
+                            continue
+
+                        sentiment = _aggregate_sentiment_results(
+                            filing_text=filing_texts[filing_idx],
+                            results=filing_results,
+                            model_name=model.name,
+                            model_version=model.version
+                        )
+                        if sentiment:
+                            sentiments.append(sentiment)
+
+                    if not sentiments:
+                        self.skipped += 1
+                        continue
+
+                    sentiment_df = compute_sentiment_long(
+                        filing_sentiments=sentiments,
+                        symbol=sym,
+                        logger=self.logger
+                    )
+
+                    if len(sentiment_df) == 0:
+                        self.skipped += 1
+                        continue
+
+                    self._upload_sentiment(cik, sentiment_df)
+                    self.success += 1
+
+                    # Mark as checkpointed
+                    if checkpoint:
+                        checkpoint.mark_processed(cik)
+
+                except Exception as e:
+                    self.logger.debug(f"Failed to process {sym}: {e}")
+                    self.failed += 1
+
+            pbar.set_postfix(ok=self.success, fail=self.failed, skip=self.skipped, cache=cache_hits, ckpt=checkpoint.count() if checkpoint else 0)
+
+            # Clear batch
+            all_chunks = []
+            batch_buffer = []
+
+        # Consumer: accumulate and batch process
         while True:
             if fetch_done.is_set() and prefetch_queue.empty():
                 break
 
             try:
-                result = prefetch_queue.get(timeout=1.0)
+                result = prefetch_queue.get(timeout=0.5)
             except Empty:
+                # If we have accumulated chunks, process them
+                if all_chunks and len(all_chunks) >= BATCH_CHUNK_TARGET // 2:
+                    process_batch()
                 continue
 
             sym, cik, filing_texts, status = result
@@ -266,36 +543,41 @@ class SentimentHandler:
                 else:
                     self.logger.debug(f"Failed to fetch {sym}: {status}")
                     self.failed += 1
-                pbar.set_postfix(ok=self.success, fail=self.failed, skip=self.skipped)
+                pbar.set_postfix(ok=self.success, fail=self.failed, skip=self.skipped, cache=cache_hits)
                 continue
 
-            try:
-                pbar.set_description(f"FinBERT [{sym}]")
-                sentiment_df = compute_fn(
-                    cik=cik,
-                    filing_texts=filing_texts,
-                    model=model,
-                    symbol=sym,
-                    logger=self.logger
-                )
-
-                if len(sentiment_df) == 0:
-                    self.skipped += 1
-                    pbar.set_postfix(ok=self.success, fail=self.failed, skip=self.skipped)
+            # Chunk all filings for this symbol and add to batch
+            chunk_map = []  # Maps filing index -> (start_chunk_idx, end_chunk_idx)
+            for filing_text in filing_texts:
+                if not filing_text.text:
+                    chunk_map.append((len(all_chunks), len(all_chunks)))
                     continue
 
-                # Upload to S3
-                self._upload_sentiment(cik, sentiment_df)
-                self.success += 1
-                pbar.set_description("Sentiment")
-                pbar.set_postfix(ok=self.success, fail=self.failed, skip=self.skipped)
+                start_idx = len(all_chunks)
+                chunks = chunk_text(filing_text.text, chunk_size=1500)
+                all_chunks.extend(chunks)
+                end_idx = len(all_chunks)
+                chunk_map.append((start_idx, end_idx))
 
-            except Exception as e:
-                self.logger.debug(f"Failed to process {sym}: {e}")
-                self.failed += 1
-                pbar.set_postfix(ok=self.success, fail=self.failed, skip=self.skipped)
+            batch_buffer.append((sym, cik, filing_texts, chunk_map))
+            symbols_in_batch += 1
+
+            # Process batch when we have enough chunks
+            if len(all_chunks) >= BATCH_CHUNK_TARGET:
+                process_batch()
+
+        # Process remaining batch
+        if all_chunks:
+            process_batch()
 
         pbar.close()
+
+        # Log cache stats
+        if mda_cache:
+            self.logger.info(
+                f"Cache stats: {cache_hits} hits, {cache_misses} misses "
+                f"({cache_hits / max(1, cache_hits + cache_misses) * 100:.1f}% hit rate)"
+            )
 
     def _upload_sentiment(self, cik: str, sentiment_df) -> None:
         """Upload sentiment DataFrame to S3."""

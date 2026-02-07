@@ -243,25 +243,28 @@ class TestFinBERTModelPredict:
             yield
 
     def test_predict_batching(self, mock_transformers):
-        """Test that predict processes in batches."""
+        """Test that predict passes batch_size to pipeline."""
         from quantdl.models.finbert import FinBERTModel
 
         model = FinBERTModel(batch_size=2)
         model._loaded = True
 
-        # Mock pipeline to return results
+        # Mock pipeline to return results for all texts
         mock_pipeline = Mock()
         mock_pipeline.return_value = [
             [{'label': 'positive', 'score': 0.9}, {'label': 'negative', 'score': 0.1}],
             [{'label': 'negative', 'score': 0.8}, {'label': 'positive', 'score': 0.2}],
+            [{'label': 'positive', 'score': 0.7}, {'label': 'negative', 'score': 0.3}],
+            [{'label': 'neutral', 'score': 0.6}, {'label': 'positive', 'score': 0.4}],
         ]
         model._pipeline = mock_pipeline
 
         texts = ["text1", "text2", "text3", "text4"]
         results = model.predict(texts)
 
-        # Should have called pipeline twice (batch_size=2, 4 texts)
-        assert mock_pipeline.call_count == 2
+        # Pipeline called once with all texts, batch_size passed for internal batching
+        assert mock_pipeline.call_count == 1
+        mock_pipeline.assert_called_once_with(texts, batch_size=2)
         assert len(results) == 4
 
     def test_predict_truncates_long_text_in_result(self, mock_transformers):

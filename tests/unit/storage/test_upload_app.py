@@ -351,7 +351,7 @@ class TestUploadAppRun:
         assert not app.upload_top_3000_monthly.called
 
     def test_run_all_enables_all_flows(self):
-        """Test run_all=True enables all upload methods."""
+        """Test run_all=True enables all upload methods except minute ticks."""
         app = _make_app()
 
         app._run_daily_ticks = Mock()
@@ -370,7 +370,7 @@ class TestUploadAppRun:
         )
 
         assert app._run_daily_ticks.called
-        assert app.upload_minute_ticks_year.called
+        assert not app.upload_minute_ticks_year.called  # minute ticks excluded from run_all by design
         assert app.upload_fundamental.called
         assert app.upload_ttm_fundamental.called
         assert app.upload_derived_fundamental.called

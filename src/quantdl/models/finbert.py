@@ -35,14 +35,14 @@ class FinBERTModel(SentimentModel):
     def __init__(
         self,
         device: Optional[str] = None,
-        batch_size: int = 8,
+        batch_size: int = 32,
         logger: Optional[logging.Logger] = None
     ):
         """
         Initialize FinBERT model.
 
         :param device: Device to run on ('cuda', 'cpu', or None for auto-detect)
-        :param batch_size: Batch size for inference (8-16 recommended for GPU)
+        :param batch_size: Batch size for inference (32 for GPU, 8 for CPU)
         :param logger: Optional logger instance
         """
         self._device = device
@@ -164,31 +164,26 @@ class FinBERTModel(SentimentModel):
         if not self._loaded:
             self.load()
 
+        # Use pipeline's internal batching for efficiency
+        # This avoids the "sequential pipeline" warning
+        all_outputs = self._pipeline(texts, batch_size=self._batch_size)
+
         results = []
+        for text, output in zip(texts, all_outputs):
+            # output is list of dicts: [{'label': 'positive', 'score': 0.9}, ...]
+            # Find highest scoring label
+            best = max(output, key=lambda x: x['score'])
 
-        # Process in batches
-        for i in range(0, len(texts), self._batch_size):
-            batch = texts[i:i + self._batch_size]
+            # Normalize label to lowercase
+            label = best['label'].lower()
 
-            # Run inference
-            batch_outputs = self._pipeline(batch)
-
-            # Parse results
-            for text, output in zip(batch, batch_outputs):
-                # output is list of dicts: [{'label': 'positive', 'score': 0.9}, ...]
-                # Find highest scoring label
-                best = max(output, key=lambda x: x['score'])
-
-                # Normalize label to lowercase
-                label = best['label'].lower()
-
-                results.append(SentimentResult(
-                    text_chunk=text[:100] + "..." if len(text) > 100 else text,
-                    label=label,
-                    score=best['score'],
-                    model_name=self.name,
-                    model_version=self.version
-                ))
+            results.append(SentimentResult(
+                text_chunk=text[:100] + "..." if len(text) > 100 else text,
+                label=label,
+                score=best['score'],
+                model_name=self.name,
+                model_version=self.version
+            ))
 
         return results
 
